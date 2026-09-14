@@ -521,6 +521,10 @@ class NetworkManager {
         this.addLog(state, `Направление хода изменилось: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'PANIC');
       } else if (drawnCard.code === 'BLIND_FAITH') {
         this.addLog(state, `Слепое доверие заставляет всех быть настороже.`, 'PANIC');
+      } else if (drawnCard.code === 'PARTY_OVER') {
+        state.doors = [];
+        state.players.forEach(p => { p.quarantineTurns = 0; });
+        this.addLog(state, `💥 «И ЭТО ВЫ НАЗЫВАЕТЕ ВЕЧЕРИНКОЙ?!» Все двери сорваны с петель, все карантины немедленно сняты!`, 'PANIC');
       }
 
       this.executeDrawPhase(local, roomId);
@@ -584,7 +588,7 @@ class NetworkManager {
           actionCard: card,
           actionType: 'ATTACK',
           expiresAt: Date.now() + 15000,
-          allowedDefenseCodes: ['MISSED'],
+          allowedDefenseCodes: ['NO_BARBECUE', 'MISSED'],
         };
         state.phase = 'DEFENSE_WAIT';
         
@@ -608,7 +612,12 @@ class NetworkManager {
 
       case 'BARRED_DOOR': {
         if (targetPlayer) {
-          state.doors.push({ playerAId: playerId, playerBId: targetPlayer.id });
+          state.doors.push({
+            seatA: activePlayer.seatIndex,
+            seatB: targetPlayer.seatIndex,
+            playerAId: playerId,
+            playerBId: targetPlayer.id,
+          });
           this.addLog(state, `🚪 ${activePlayer.name} наглухо заколотил проход к ${targetPlayer.name}!`, 'WARNING');
         }
         this.advanceToExchange(local, roomId);
@@ -617,8 +626,8 @@ class NetworkManager {
 
       case 'QUARANTINE': {
         if (targetPlayer) {
-          targetPlayer.quarantineTurns = 2;
-          this.addLog(state, `☣️ ${targetPlayer.name} отправлен в КАРАНТИН на 2 раунда!`, 'WARNING');
+          targetPlayer.quarantineTurns = 3;
+          this.addLog(state, `☣️ ${targetPlayer.name} отправлен в КАРАНТИН на 3 хода!`, 'WARNING');
         }
         this.advanceToExchange(local, roomId);
         break;
@@ -683,13 +692,37 @@ class NetworkManager {
         break;
       }
 
-      case 'SWITCH_PLACES': {
-        if (targetPlayer) {
-          const tempSeat = activePlayer.seatIndex;
-          activePlayer.seatIndex = targetPlayer.seatIndex;
-          targetPlayer.seatIndex = tempSeat;
-          this.addLog(state, `🔄 ${activePlayer.name} и ${targetPlayer.name} поменялись местами за столом!`, 'INFO');
+      case 'SWITCH_PLACES':
+      case 'GET_OUT_OF_HERE': {
+        if (!targetPlayer) break;
+        let targetPrivate: PlayerPrivate | null = local.privateStates[targetPlayer.id] || null;
+        if (!targetPrivate) {
+          targetPrivate = await this.getPlayerPrivate(roomId, targetPlayer.id);
+          if (targetPrivate) local.privateStates[targetPlayer.id] = targetPrivate;
         }
+
+        const hasDefense = targetPrivate?.cards.some(c => c.code === 'IM_FINE_HERE');
+        if (hasDefense) {
+          state.pendingDefense = {
+            sourcePlayerId: playerId,
+            targetPlayerId: targetPlayer.id,
+            actionCard: card,
+            actionType: 'SWITCH_PLACES',
+            expiresAt: Date.now() + 15000,
+            allowedDefenseCodes: ['IM_FINE_HERE'],
+          };
+          state.phase = 'DEFENSE_WAIT';
+          this.addLog(state, `🔄 ${activePlayer.name} пытается поменяться местами с ${targetPlayer.name}... У цели есть шанс защититься!`, 'DEFENSE');
+          if (targetPlayer.isBot) {
+            setTimeout(() => this.runBotDefense(roomId), 1500);
+          }
+          break;
+        }
+
+        const tempSeat = activePlayer.seatIndex;
+        activePlayer.seatIndex = targetPlayer.seatIndex;
+        targetPlayer.seatIndex = tempSeat;
+        this.addLog(state, `🔄 ${activePlayer.name} и ${targetPlayer.name} поменялись местами за столом!`, 'INFO');
         this.advanceToExchange(local, roomId);
         break;
       }
@@ -861,7 +894,7 @@ class NetworkManager {
       targetPrivate = await this.getPlayerPrivate(roomId, targetNeighbor.id);
       if (targetPrivate) local.privateStates[targetNeighbor.id] = targetPrivate;
     }
-    const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR');
+    const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR' || c.code === 'MISSED');
 
     if (hasDefense) {
       state.pendingDefense = {
@@ -870,7 +903,7 @@ class NetworkManager {
         actionCard: card,
         actionType: 'EXCHANGE',
         expiresAt: Date.now() + 15000,
-        allowedDefenseCodes: ['NO_THANKS', 'FEAR'],
+        allowedDefenseCodes: ['NO_THANKS', 'FEAR', 'MISSED'],
         offeredCard: card,
       };
       state.phase = 'EXCHANGE_DEFENSE_WAIT';
@@ -1008,17 +1041,44 @@ class NetworkManager {
       defenderPlayer.handCount = defenderPrivate.cards.length;
       state.discardPile.unshift(card);
 
-      if (card.code === 'MISSED') {
-        this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «МИМО!» и уклонился от огнемёта!`, 'DEFENSE');
+      if (card.code === 'NO_BARBECUE') {
+        this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «НИКАКОГО ШАШЛЫКА!» и спасся от огнемёта!`, 'DEFENSE');
+        this.drawReplacementCardForDefender(local, defenderId);
         state.pendingDefense = null;
         this.advanceToExchange(local, roomId);
+      } else if (card.code === 'MISSED') {
+        if (defense.actionType === 'ATTACK') {
+          this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «МИМО!» и уклонился от огнемёта!`, 'DEFENSE');
+          this.drawReplacementCardForDefender(local, defenderId);
+          state.pendingDefense = null;
+          this.advanceToExchange(local, roomId);
+        } else if (defense.actionType === 'EXCHANGE') {
+          this.addLog(state, `↪️ ${defenderPlayer.name} сыграл «МИМО!» — обмен передается следующему игроку!`, 'DEFENSE');
+          this.drawReplacementCardForDefender(local, defenderId);
+          state.pendingDefense = null;
+
+          const living = getLivingPlayers(state.players);
+          const defIdx = living.findIndex(p => p.id === defenderId);
+          const nextIdx = (defIdx + (state.direction === 1 ? 1 : -1) + living.length) % living.length;
+          const redirectTarget = living[nextIdx];
+
+          if (redirectTarget && redirectTarget.id !== defense.sourcePlayerId && !redirectTarget.isDead && redirectTarget.quarantineTurns === 0) {
+            this.forwardExchangeOffer(local, roomId, defense.sourcePlayerId, redirectTarget.id, defense.offeredCard || defense.actionCard);
+          } else {
+            this.addLog(state, `Обмен картами завершен.`);
+            local.offeredExchangeCard = undefined;
+            this.endTurn(local, roomId);
+          }
+        }
       } else if (card.code === 'NO_THANKS') {
         this.addLog(state, `🙅‍♂️ ${defenderPlayer.name} ответил «НЕТ, СПАСИБО!» и отказался от обмена.`, 'DEFENSE');
+        this.drawReplacementCardForDefender(local, defenderId);
         state.pendingDefense = null;
         local.offeredExchangeCard = undefined;
         this.endTurn(local, roomId);
       } else if (card.code === 'FEAR') {
         this.addLog(state, `😱 ${defenderPlayer.name} сыграл «СТРАХ»! Обмен отменен, а предложенная карта раскрыта!`, 'DEFENSE');
+        this.drawReplacementCardForDefender(local, defenderId);
         if (defense.offeredCard) {
           state.revealedCards = {
             fromPlayerId: defense.sourcePlayerId,
@@ -1030,6 +1090,11 @@ class NetworkManager {
         state.pendingDefense = null;
         local.offeredExchangeCard = undefined;
         this.endTurn(local, roomId);
+      } else if (card.code === 'IM_FINE_HERE') {
+        this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «МНЕ И ЗДЕСЬ НЕПЛОХО»! Смена мест отменена.`, 'DEFENSE');
+        this.drawReplacementCardForDefender(local, defenderId);
+        state.pendingDefense = null;
+        this.advanceToExchange(local, roomId);
       }
     } else {
       if (defense.actionType === 'ATTACK' && defense.actionCard.code === 'FLAMETHROWER') {
@@ -1069,12 +1134,99 @@ class NetworkManager {
         if (defenderPlayer.isBot) {
           setTimeout(() => this.runBotExchangeResponse(roomId), 1200);
         }
+      } else if (defense.actionType === 'SWITCH_PLACES') {
+        const sourcePlayer = state.players.find(p => p.id === defense.sourcePlayerId);
+        if (sourcePlayer && defenderPlayer) {
+          const tempSeat = sourcePlayer.seatIndex;
+          sourcePlayer.seatIndex = defenderPlayer.seatIndex;
+          defenderPlayer.seatIndex = tempSeat;
+          this.addLog(state, `🔄 ${sourcePlayer.name} и ${defenderPlayer.name} поменялись местами за столом!`, 'INFO');
+        }
+        state.pendingDefense = null;
+        this.advanceToExchange(local, roomId);
       }
     }
 
     state.lastUpdated = Date.now();
     await this.saveAndSync(roomId, local);
     return { success: true };
+  }
+
+  // Добор карты взамен сыгранной карты защиты (Официальные правила, стр. 12)
+  private drawReplacementCardForDefender(local: LocalGameState, defenderId: string) {
+    const state = local.publicState;
+    const defenderPlayer = state.players.find(p => p.id === defenderId);
+    const defenderPrivate = local.privateStates[defenderId];
+    if (!defenderPlayer || !defenderPrivate) return;
+
+    let safetyCounter = 0;
+    while (safetyCounter++ < 20) {
+      if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
+        if (state.discardPile.length > 0) {
+          local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
+          state.discardPile = [];
+          this.addLog(state, `Колода пополнена из сброса для добора карты взамен защиты.`);
+        } else {
+          break;
+        }
+      }
+      const drawn = local.fullDrawDeck.shift()!;
+      state.deckCount = local.fullDrawDeck.length;
+
+      // Если взята карта паники при доборе взамен защиты, она сбрасывается без эффекта (стр. 12 правил)
+      if (drawn.category === 'PANIC') {
+        state.discardPile.unshift(drawn);
+        this.addLog(state, `⚠️ Карта паники «${drawn.name}», вытянутая взамен карты защиты, сброшена без эффекта.`);
+        continue;
+      }
+
+      defenderPrivate.cards.push(drawn);
+      defenderPlayer.handCount = defenderPrivate.cards.length;
+      this.addLog(state, `🎴 ${defenderPlayer.name} добрал 1 карту из колоды взамен сыгранной защиты.`);
+      break;
+    }
+  }
+
+  // Перенаправление обмена при розыгрыше «МИМО!» (Официальные правила, стр. 12)
+  private forwardExchangeOffer(local: LocalGameState, roomId: string, sourcePlayerId: string, targetPlayerId: string, card: GameCard) {
+    const state = local.publicState;
+    const targetPlayer = state.players.find(p => p.id === targetPlayerId);
+    if (!targetPlayer) {
+      this.endTurn(local, roomId);
+      return;
+    }
+
+    local.offeredExchangeCard = {
+      fromPlayerId: sourcePlayerId,
+      targetPlayerId,
+      card,
+    };
+
+    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
+    const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR' || c.code === 'MISSED');
+
+    if (hasDefense) {
+      state.pendingDefense = {
+        sourcePlayerId,
+        targetPlayerId,
+        actionCard: card,
+        actionType: 'EXCHANGE',
+        expiresAt: Date.now() + 15000,
+        allowedDefenseCodes: ['NO_THANKS', 'FEAR', 'MISSED'],
+        offeredCard: card,
+      };
+      state.phase = 'EXCHANGE_DEFENSE_WAIT';
+      this.addLog(state, `Обмен перенаправлен на ${targetPlayer.name}... Есть ли защита?`, 'EXCHANGE');
+      if (targetPlayer.isBot) {
+        setTimeout(() => this.runBotDefense(roomId), 1500);
+      }
+    } else {
+      state.phase = 'EXCHANGE_RESPOND';
+      this.addLog(state, `${targetPlayer.name} должен выбрать карту для ответного обмена.`, 'EXCHANGE');
+      if (targetPlayer.isBot) {
+        setTimeout(() => this.runBotExchangeResponse(roomId), 1500);
+      }
+    }
   }
 
   // 12. Перезапуск в лобби (Реванш)
@@ -1128,20 +1280,24 @@ class NetworkManager {
 
     if (living.length === 0) return;
 
+    // Уменьшаем счетчик карантина у активного игрока за его завершенный ход (Официальные правила, стр. 13)
+    const currentId = state.currentTurnPlayerId;
+    const currentTurnPlayer = state.players.find(p => p.id === currentId);
+    if (currentTurnPlayer && currentTurnPlayer.quarantineTurns > 0) {
+      currentTurnPlayer.quarantineTurns -= 1;
+      if (currentTurnPlayer.quarantineTurns === 0) {
+        this.addLog(state, `Карантин игрока ${currentTurnPlayer.name} истек. Он возвращается в строй.`);
+      } else {
+        this.addLog(state, `У игрока ${currentTurnPlayer.name} осталось ходов карантина: ${currentTurnPlayer.quarantineTurns}.`);
+      }
+    }
+
     const currentIdx = living.findIndex(p => p.id === state.currentTurnPlayerId);
     const nextIdx = (currentIdx + (state.direction === 1 ? 1 : -1) + living.length) % living.length;
     const nextPlayer = living[nextIdx];
 
     if (nextIdx === 0) {
       state.roundNumber += 1;
-      state.players.forEach(p => {
-        if (p.quarantineTurns > 0) {
-          p.quarantineTurns -= 1;
-          if (p.quarantineTurns === 0) {
-            this.addLog(state, `Карантин игрока ${p.name} истек. Он возвращается в строй.`);
-          }
-        }
-      });
     }
 
     state.currentTurnPlayerId = nextPlayer.id;

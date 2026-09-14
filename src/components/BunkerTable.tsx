@@ -157,21 +157,30 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
 
       </div>
 
-      {/* Отрисовка заколоченных дверей между игроками */}
+      {/* Отрисовка заколоченных дверей между игроками по физическим местам */}
       {doors.map((door, dIdx) => {
-        const pAIdx = sortedPlayers.findIndex(p => p.id === door.playerAId);
-        const pBIdx = sortedPlayers.findIndex(p => p.id === door.playerBId);
+        let pAIdx = -1;
+        let pBIdx = -1;
+
+        if (door.seatA !== undefined && door.seatB !== undefined) {
+          pAIdx = sortedPlayers.findIndex(p => p.seatIndex === door.seatA);
+          pBIdx = sortedPlayers.findIndex(p => p.seatIndex === door.seatB);
+        } else {
+          pAIdx = sortedPlayers.findIndex(p => p.id === door.playerAId);
+          pBIdx = sortedPlayers.findIndex(p => p.id === door.playerBId);
+        }
+
         if (pAIdx === -1 || pBIdx === -1) return null;
 
         const posA = getPlayerPosition(pAIdx);
         const posB = getPlayerPosition(pBIdx);
-        // Середина между двумя игроками
+        // Середина между двумя местами за столом
         const midX = (posA.x + posB.x) / 2;
         const midY = (posA.y + posB.y) / 2;
 
         return (
           <div
-            key={`door_${door.playerAId}_${door.playerBId}_${dIdx}`}
+            key={`door_${door.seatA ?? door.playerAId}_${door.seatB ?? door.playerBId}_${dIdx}`}
             style={{ left: `${midX}%`, top: `${midY}%` }}
             className="absolute -translate-x-1/2 -translate-y-1/2 z-30 flex items-center justify-center"
             title="Заколоченная дверь: блокирует обмен картами и атаки соседа"

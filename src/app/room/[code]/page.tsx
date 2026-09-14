@@ -184,7 +184,7 @@ export default function RoomPage() {
 
   // ИГРОВЫЕ ДЕЙСТВИЯ (ACTION PHASE)
   const handlePlayCardClick = async (card: GameCard) => {
-    const targetedCodes = ['FLAMETHROWER', 'AXE', 'ANALYSIS', 'SUSPICION', 'BARRED_DOOR', 'QUARANTINE', 'SWITCH_PLACES', 'SEDUCTION'];
+    const targetedCodes = ['FLAMETHROWER', 'AXE', 'ANALYSIS', 'SUSPICION', 'BARRED_DOOR', 'QUARANTINE', 'SWITCH_PLACES', 'GET_OUT_OF_HERE', 'SEDUCTION'];
     if (targetedCodes.includes(card.code)) {
       setTargetCardToPlay(card);
     } else {

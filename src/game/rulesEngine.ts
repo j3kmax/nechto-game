@@ -51,7 +51,7 @@ export function getPlayerNeighbors(
   const targetNeighbor = direction === 1 ? rightNeighbor : leftNeighbor;
 
   // Проверка двери между игроком и целью
-  const isBlockedByDoor = isDoorBetween(doors, currentId, targetNeighbor.id);
+  const isBlockedByDoor = isDoorBetween(doors, currentId, targetNeighbor.id, players);
 
   return {
     targetNeighbor,
@@ -62,13 +62,36 @@ export function getPlayerNeighbors(
 }
 
 /**
- * Проверка наличия двери между двумя игроками
+ * Проверка наличия двери между двумя игроками (с учетом физических мест за столом)
  */
-export function isDoorBetween(doors: BarredDoor[], playerAId: string, playerBId: string): boolean {
-  return doors.some(
-    d => (d.playerAId === playerAId && d.playerBId === playerBId) ||
-         (d.playerAId === playerBId && d.playerBId === playerAId)
-  );
+export function isDoorBetween(
+  doors: BarredDoor[],
+  playerAId: string,
+  playerBId: string,
+  players?: PlayerPublic[]
+): boolean {
+  if (!doors || doors.length === 0) return false;
+
+  let seatA: number | undefined;
+  let seatB: number | undefined;
+
+  if (players) {
+    seatA = players.find(p => p.id === playerAId)?.seatIndex;
+    seatB = players.find(p => p.id === playerBId)?.seatIndex;
+  }
+
+  return doors.some(d => {
+    // 1. Проверка по физическим местам стола (официальные правила: двери остаются на местах)
+    if (seatA !== undefined && seatB !== undefined && d.seatA !== undefined && d.seatB !== undefined) {
+      return (d.seatA === seatA && d.seatB === seatB) || (d.seatA === seatB && d.seatB === seatA);
+    }
+    // 2. Обратная совместимость по ID игроков (только если места еще не были сохранены)
+    if (d.seatA === undefined && d.seatB === undefined && d.playerAId && d.playerBId) {
+      return (d.playerAId === playerAId && d.playerBId === playerBId) ||
+             (d.playerAId === playerBId && d.playerBId === playerAId);
+    }
+    return false;
+  });
 }
 
 /**
@@ -87,7 +110,7 @@ export function validatePlayCard(
   }
 
   if (activePlayer.quarantineTurns > 0 && card.code !== 'PERSEVERANCE' && card.code !== 'WHISKEY') {
-    return { valid: false, error: 'Вы находитесь в карантине и ограничены в действиях.' };
+    return { valid: false, error: 'Вы находитесь в карантине и можете только сбросить карту.' };
   }
 
   if (card.category === 'THE_THING') {
@@ -109,7 +132,7 @@ export function validatePlayCard(
       if (targetPlayer.isDead) return { valid: false, error: 'Цель уже мертва.' };
       if (targetPlayer.id === activePlayer.id) return { valid: false, error: 'Нельзя сжечь самого себя.' };
       if (targetPlayer.quarantineTurns > 0) return { valid: false, error: 'Цель находится в карантине (защищена от атак соседа).' };
-      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id)) {
+      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id, room.players)) {
         return { valid: false, error: 'Проход заколочен дверью. Сначала срубите её топором.' };
       }
       // Должен быть живым соседом
@@ -138,7 +161,7 @@ export function validatePlayCard(
       if (targetPlayer.isDead) return { valid: false, error: 'Нельзя проверять мертвого.' };
       if (targetPlayer.id === activePlayer.id) return { valid: false, error: 'Нельзя проверять самого себя.' };
       if (targetPlayer.quarantineTurns > 0) return { valid: false, error: 'Цель находится в карантине.' };
-      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id)) {
+      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id, room.players)) {
         return { valid: false, error: 'Дверь преграждает доступ к игроку.' };
       }
       const neighbors = getPlayerNeighbors(room.players, activePlayer.id, room.direction, room.doors);
@@ -153,8 +176,8 @@ export function validatePlayCard(
       if (!targetPlayer) return { valid: false, error: 'Выберите соседа, с которым хотите заколотить дверь.' };
       const neighbors = getPlayerNeighbors(room.players, activePlayer.id, room.direction, room.doors);
       const isNeighbor = neighbors.leftNeighbor?.id === targetPlayer.id || neighbors.rightNeighbor?.id === targetPlayer.id;
-      if (!isNeighbor) return { valid: false, error: 'Дверь можно установить только между смежными игроками.' };
-      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id)) {
+      if (!isNeighbor) return { valid: false, error: 'Дверь можно установить только между смежными соседями за столом.' };
+      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id, room.players)) {
         return { valid: false, error: 'Между вами уже установлена заколоченная дверь.' };
       }
       return { valid: true };
@@ -172,12 +195,21 @@ export function validatePlayCard(
 
     case 'SWITCH_PLACES': {
       if (!targetPlayer) return { valid: false, error: 'Выберите соседа для перемены мест.' };
+      if (targetPlayer.quarantineTurns > 0) return { valid: false, error: 'Сосед находится в карантине.' };
       const neighbors = getPlayerNeighbors(room.players, activePlayer.id, room.direction, room.doors);
       const isNeighbor = neighbors.leftNeighbor?.id === targetPlayer.id || neighbors.rightNeighbor?.id === targetPlayer.id;
       if (!isNeighbor) return { valid: false, error: 'Поменяться местами можно только со смежным соседом.' };
-      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id)) {
+      if (isDoorBetween(room.doors, activePlayer.id, targetPlayer.id, room.players)) {
         return { valid: false, error: 'Дверь мешает поменяться местами.' };
       }
+      return { valid: true };
+    }
+
+    case 'GET_OUT_OF_HERE': {
+      if (!targetPlayer) return { valid: false, error: 'Выберите игрока, с которым хотите поменяться местами.' };
+      if (targetPlayer.id === activePlayer.id) return { valid: false, error: 'Нельзя поменяться местами с самим собой.' };
+      if (targetPlayer.isDead) return { valid: false, error: 'Игрок мертв.' };
+      if (targetPlayer.quarantineTurns > 0) return { valid: false, error: 'Игрок находится в карантине (пересесть к нему нельзя).' };
       return { valid: true };
     }
 
@@ -185,9 +217,11 @@ export function validatePlayCard(
       if (!targetPlayer) return { valid: false, error: 'Выберите любого живого игрока для обмена.' };
       if (targetPlayer.id === activePlayer.id) return { valid: false, error: 'Нельзя меняться с самим собой.' };
       if (targetPlayer.isDead) return { valid: false, error: 'Игрок мертв.' };
+      if (targetPlayer.quarantineTurns > 0) return { valid: false, error: 'Игрок в карантине не может меняться картами.' };
       return { valid: true };
     }
 
+    case 'CHANGE_DIRECTION':
     case 'WHISKEY':
     case 'PERSEVERANCE':
       return { valid: true };

@@ -18,7 +18,8 @@ import {
   Biohazard, 
   Skull, 
   Sparkles,
-  AlertTriangle,
+  Footprints,
+  Bomb,
   Info
 } from 'lucide-react';
 import { soundFx } from '@/lib/soundEffects';
@@ -115,6 +116,14 @@ export const getCardVisual = (code: string) => {
         badge: 'bg-blue-950 text-blue-300 border-blue-500/50',
         label: 'ДЕЙСТВИЕ',
       };
+    case 'GET_OUT_OF_HERE':
+      return {
+        icon: <Footprints className="w-8 h-8 text-sky-400" />,
+        bg: 'bg-gradient-to-b from-sky-950/50 to-polar-950',
+        border: 'border-sky-500/50 shadow-sky-950/40',
+        badge: 'bg-sky-950 text-sky-300 border-sky-500/50',
+        label: 'ДЕЙСТВИЕ',
+      };
     case 'PERSEVERANCE':
       return {
         icon: <Search className="w-8 h-8 text-indigo-400" />,
@@ -131,6 +140,22 @@ export const getCardVisual = (code: string) => {
         badge: 'bg-emerald-950 text-emerald-300 border-emerald-500/50',
         label: 'ЗАЩИТА',
       };
+    case 'NO_BARBECUE':
+      return {
+        icon: <ShieldCheck className="w-8 h-8 text-amber-400" />,
+        bg: 'bg-gradient-to-b from-amber-950/60 to-polar-950',
+        border: 'border-amber-500/60 shadow-amber-950/40',
+        badge: 'bg-amber-950 text-amber-300 border-amber-500/50',
+        label: 'ЗАЩИТА',
+      };
+    case 'IM_FINE_HERE':
+      return {
+        icon: <ShieldCheck className="w-8 h-8 text-cyan-400" />,
+        bg: 'bg-gradient-to-b from-cyan-950/60 to-polar-950',
+        border: 'border-cyan-500/60 shadow-cyan-950/40',
+        badge: 'bg-cyan-950 text-cyan-300 border-cyan-500/50',
+        label: 'ЗАЩИТА',
+      };
     case 'MISSED':
       return {
         icon: <ShieldCheck className="w-8 h-8 text-emerald-400" />,
@@ -138,6 +163,14 @@ export const getCardVisual = (code: string) => {
         border: 'border-emerald-500/60 shadow-emerald-950/40',
         badge: 'bg-emerald-950 text-emerald-300 border-emerald-500/50',
         label: 'ЗАЩИТА',
+      };
+    case 'PARTY_OVER':
+      return {
+        icon: <Bomb className="w-8 h-8 text-rose-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-rose-950/60 to-polar-950',
+        border: 'border-rose-500/60 shadow-rose-950/40',
+        badge: 'bg-rose-950 text-rose-300 border-rose-500/50',
+        label: 'ПАНИКА',
       };
     case 'FEAR':
       return {

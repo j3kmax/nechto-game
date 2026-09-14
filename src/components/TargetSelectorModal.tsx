@@ -1,9 +1,11 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { GameCard, PlayerPublic, BarredDoor } from '@/types/game';
 import { getAvatarIcon } from './AvatarSelector';
+import { getLivingPlayers, getPlayerNeighbors, isDoorBetween } from '@/game/rulesEngine';
 import { X, Flame, Axe, DoorClosed, Biohazard, ShieldAlert } from 'lucide-react';
+import { soundFx } from '@/lib/soundEffects';
 
 interface TargetSelectorModalProps {
   card: GameCard;
@@ -26,13 +28,18 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
   onSelectDoorIndex,
   onClose,
 }) => {
-  const livingPlayers = players.filter(p => !p.isDead);
-  const myIndex = livingPlayers.findIndex(p => p.id === currentUserId);
-  const n = livingPlayers.length;
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
-  // Определение допустимых целей в зависимости от типа карты
-  const leftNeighbor = n >= 2 && myIndex !== -1 ? livingPlayers[(myIndex - 1 + n) % n] : null;
-  const rightNeighbor = n >= 2 && myIndex !== -1 ? livingPlayers[(myIndex + 1) % n] : null;
+  const livingPlayers = getLivingPlayers(players);
+  const neighbors = getPlayerNeighbors(players, currentUserId, direction, doors);
+  const leftNeighbor = neighbors.leftNeighbor;
+  const rightNeighbor = neighbors.rightNeighbor;
 
   const isFlamethrower = card.code === 'FLAMETHROWER';
   const isAxe = card.code === 'AXE';
@@ -40,20 +47,61 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
   const isQuarantine = card.code === 'QUARANTINE';
   const isSeduction = card.code === 'SEDUCTION';
   const isSwitch = card.code === 'SWITCH_PLACES';
+  const isGetOutOfHere = card.code === 'GET_OUT_OF_HERE';
 
-  // Фильтруем игроков
+  // Фильтруем игроков строго по официальным правилам рассадки за столом
   const candidatePlayers = livingPlayers.filter(p => {
-    if (p.id === currentUserId && !isQuarantine) return false;
-
-    if (isSeduction) return p.id !== currentUserId;
-
-    if (isFlamethrower || isSwitch || isDoor || isQuarantine || card.code === 'ANALYSIS' || card.code === 'SUSPICION') {
-      const isDirectNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-      if (!isDirectNeighbor && p.id !== currentUserId) return false;
-      if (isFlamethrower && p.quarantineTurns > 0) return false;
-      return true;
+    // 1. «Сматывай удочки!»: любой живой игрок за столом, кроме себя, если он не в карантине (двери игнорируются)
+    if (isGetOutOfHere) {
+      return p.id !== currentUserId && p.quarantineTurns === 0;
     }
 
+    // 2. «Соблазн»: любой живой игрок за столом, кроме себя, если он не в карантине
+    if (isSeduction) {
+      return p.id !== currentUserId && p.quarantineTurns === 0;
+    }
+
+    // 3. «Карантин»: на себя или на смежного соседа (если еще не в карантине)
+    if (isQuarantine) {
+      if (p.quarantineTurns > 0) return false;
+      return p.id === currentUserId || p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
+    }
+
+    // 4. Себя нельзя выбирать для других действий
+    if (p.id === currentUserId) return false;
+
+    // 5. «Заколоченная дверь»: только смежный сосед, с которым двери еще нет
+    if (isDoor) {
+      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
+      if (!isNeighbor) return false;
+      return !isDoorBetween(doors, currentUserId, p.id, players);
+    }
+
+    // 6. «Огнемёт»: только смежный сосед, не за дверью и не в карантине
+    if (isFlamethrower) {
+      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
+      if (!isNeighbor) return false;
+      if (p.quarantineTurns > 0) return false;
+      return !isDoorBetween(doors, currentUserId, p.id, players);
+    }
+
+    // 7. «Меняемся местами!»: только смежный сосед, не за дверью и не в карантине
+    if (isSwitch) {
+      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
+      if (!isNeighbor) return false;
+      if (p.quarantineTurns > 0) return false;
+      return !isDoorBetween(doors, currentUserId, p.id, players);
+    }
+
+    // 8. «Анализ» и «Подозрение»: только смежный сосед, не за дверью и не в карантине
+    if (card.code === 'ANALYSIS' || card.code === 'SUSPICION') {
+      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
+      if (!isNeighbor) return false;
+      if (p.quarantineTurns > 0) return false;
+      return !isDoorBetween(doors, currentUserId, p.id, players);
+    }
+
+    // 9. «Топор»: игрок в карантине (смежный или сам)
     if (isAxe) {
       return p.quarantineTurns > 0;
     }
@@ -62,8 +110,16 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-      <div className="relative w-full max-w-lg p-6 rounded-2xl bg-polar-900 border border-frost/30 shadow-2xl shadow-cyan-950/60 text-slate-100">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in select-none"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div 
+        className="relative w-full max-w-lg p-6 rounded-2xl bg-polar-900 border border-frost/30 shadow-2xl shadow-cyan-950/60 text-slate-100 animate-in zoom-in-95 duration-200"
+        onClick={(e) => e.stopPropagation()}
+      >
         
         {/* Заголовок */}
         <div className="flex items-center justify-between pb-3 mb-4 border-b border-white/10">
@@ -76,8 +132,10 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
+            title="Закрыть (Esc)"
           >
             <X className="w-5 h-5" />
           </button>
@@ -91,16 +149,22 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
             </div>
             <div className="flex flex-col gap-2">
               {doors.map((d, idx) => {
-                const pA = players.find(p => p.id === d.playerAId)?.name || 'Игрок';
-                const pB = players.find(p => p.id === d.playerBId)?.name || 'Игрок';
+                const pA = (d.seatA !== undefined ? players.find(p => p.seatIndex === d.seatA) : null) || players.find(p => p.id === d.playerAId);
+                const pB = (d.seatB !== undefined ? players.find(p => p.seatIndex === d.seatB) : null) || players.find(p => p.id === d.playerBId);
+                const nameA = pA?.name || `Место ${d.seatA ?? 'A'}`;
+                const nameB = pB?.name || `Место ${d.seatB ?? 'B'}`;
                 return (
                   <button
                     key={`door_opt_${idx}`}
-                    onClick={() => onSelectDoorIndex(idx)}
-                    className="flex items-center justify-between p-3 rounded-xl bg-polar-950 border border-amber-500/30 hover:border-amber-400 text-left transition-all hover:bg-amber-950/30"
+                    type="button"
+                    onClick={() => {
+                      soundFx.playBarricade();
+                      onSelectDoorIndex(idx);
+                    }}
+                    className="flex items-center justify-between p-3 rounded-xl bg-polar-950 border border-amber-500/30 hover:border-amber-400 text-left transition-all hover:bg-amber-950/30 cursor-pointer active:scale-98"
                   >
                     <span className="text-xs text-slate-200">
-                      Дверь между <strong className="text-frost">{pA}</strong> и <strong className="text-frost">{pB}</strong>
+                      Дверь между <strong className="text-frost">{nameA}</strong> и <strong className="text-frost">{nameB}</strong>
                     </span>
                     <span className="text-xs font-bold px-2 py-1 rounded bg-amber-500 text-polar-950">
                       Срубить!

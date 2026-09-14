@@ -44,6 +44,7 @@ export function setupGameDeck(playerIds: string[]): DeckBuildResult {
   // Добавляем карты действий, защиты и препятствий
   const safeTemplates: { code: CardCode; count: number }[] = [
     { code: 'FLAMETHROWER', count: Math.max(3, Math.floor(numPlayers * 0.8)) },
+    { code: 'NO_BARBECUE', count: Math.max(2, Math.floor(numPlayers * 0.6)) },
     { code: 'AXE', count: Math.max(2, Math.floor(numPlayers * 0.5)) },
     { code: 'NO_THANKS', count: Math.max(3, Math.floor(numPlayers * 0.8)) },
     { code: 'MISSED', count: Math.max(3, Math.floor(numPlayers * 0.8)) },
@@ -55,6 +56,8 @@ export function setupGameDeck(playerIds: string[]): DeckBuildResult {
     { code: 'WHISKEY', count: Math.max(2, Math.floor(numPlayers * 0.4)) },
     { code: 'SEDUCTION', count: Math.max(2, Math.floor(numPlayers * 0.4)) },
     { code: 'SWITCH_PLACES', count: Math.max(2, Math.floor(numPlayers * 0.5)) },
+    { code: 'GET_OUT_OF_HERE', count: Math.max(2, Math.floor(numPlayers * 0.5)) },
+    { code: 'IM_FINE_HERE', count: Math.max(2, Math.floor(numPlayers * 0.6)) },
     { code: 'PERSEVERANCE', count: Math.max(2, Math.floor(numPlayers * 0.5)) },
   ];
 
@@ -109,18 +112,21 @@ export function setupGameDeck(playerIds: string[]): DeckBuildResult {
   }
 
   // Добавляем карты Паники
-  const panicCount = Math.max(3, Math.floor(numPlayers * 0.7));
+  const panicCount = Math.max(2, Math.floor(numPlayers * 0.5));
   for (let i = 0; i < panicCount; i++) {
     drawDeckPool.push(generateCard('CHANGE_DIRECTION', cardSeq++));
     drawDeckPool.push(generateCard('BLIND_FAITH', cardSeq++));
+    drawDeckPool.push(generateCard('PARTY_OVER', cardSeq++));
   }
 
-  // Дополнительные огнеметы и топоры для остроты игры
+  // Дополнительные ключевые карты для остроты игры
   for (let i = 0; i < 2; i++) {
     drawDeckPool.push(generateCard('FLAMETHROWER', cardSeq++));
+    drawDeckPool.push(generateCard('NO_BARBECUE', cardSeq++));
     drawDeckPool.push(generateCard('AXE', cardSeq++));
     drawDeckPool.push(generateCard('NO_THANKS', cardSeq++));
     drawDeckPool.push(generateCard('MISSED', cardSeq++));
+    drawDeckPool.push(generateCard('IM_FINE_HERE', cardSeq++));
   }
 
   const finalDrawDeck = shuffle(drawDeckPool);

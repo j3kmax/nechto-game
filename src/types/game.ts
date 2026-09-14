@@ -17,15 +17,19 @@ export type CardCode =
   | 'SUSPICION'        // Подозрение
   | 'WHISKEY'          // Виски
   | 'SEDUCTION'        // Соблазн
-  | 'SWITCH_PLACES'    // Перемена мест
+  | 'SWITCH_PLACES'    // Меняемся местами!
+  | 'GET_OUT_OF_HERE'  // Сматывай удочки!
   | 'PERSEVERANCE'     // Упорство
-  | 'NO_THANKS'        // Нет, спасибо!
+  | 'NO_THANKS'        // Нет уж, спасибо!
   | 'MISSED'           // Мимо!
+  | 'NO_BARBECUE'      // Никакого шашлыка!
+  | 'IM_FINE_HERE'     // Мне и здесь неплохо
   | 'FEAR'             // Страх
   | 'BARRED_DOOR'      // Заколоченная дверь
   | 'QUARANTINE'       // Карантин
-  | 'CHANGE_DIRECTION' // Смена направления
-  | 'BLIND_FAITH';     // Слепое доверие
+  | 'CHANGE_DIRECTION' // Гляди по сторонам / Смена направления
+  | 'BLIND_FAITH'      // Слепое доверие
+  | 'PARTY_OVER';      // И это вы называете вечеринкой?
 
 export interface GameCard {
   id: string;
@@ -80,15 +84,18 @@ export interface PendingDefense {
   sourcePlayerId: string;
   targetPlayerId: string;
   actionCard: GameCard;
-  actionType: 'ATTACK' | 'EXCHANGE';
+  actionType: 'ATTACK' | 'EXCHANGE' | 'SWITCH_PLACES';
   expiresAt: number; // unix timestamp in ms
   allowedDefenseCodes: CardCode[];
   offeredCard?: GameCard; // for exchange
 }
 
 export interface BarredDoor {
-  playerAId: string;
-  playerBId: string;
+  seatA: number; // Индекс первого места за столом
+  seatB: number; // Индекс второго места за столом
+  playerAId?: string; // ID игрока при установке (для совместимости)
+  playerBId?: string; // ID игрока при установке (для совместимости)
+  createdAt?: number;
 }
 
 export interface GameLogEntry {
