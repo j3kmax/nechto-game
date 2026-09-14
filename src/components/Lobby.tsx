@@ -40,7 +40,7 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [copied, setCopied] = useState(false);
   const isHost = roomState.hostId === currentUserId;
   const numPlayers = roomState.players.length;
-  const canStart = numPlayers >= 4;
+  const canStart = numPlayers === 4 || numPlayers === 5;
 
   const copyRoomLink = () => {
     if (typeof window !== 'undefined') {
@@ -80,14 +80,26 @@ export const Lobby: React.FC<LobbyProps> = ({
           </div>
         </div>
 
-        {/* Статус заполнения */}
-        <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-polar-950 border border-white/10 text-xs">
-          <Users className="w-4 h-4 text-frost" />
-          <span className="text-slate-300">
-            Готовы к высадке: <strong className="text-frost">{numPlayers}</strong> / {roomState.settings.maxPlayers}
-          </span>
-          {numPlayers < 4 && (
-            <span className="text-hazard-amber font-semibold ml-1">(нужно еще {4 - numPlayers})</span>
+        {/* Статус заполнения и колоды */}
+        <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-polar-950 border border-white/10 text-xs">
+            <Users className="w-4 h-4 text-frost" />
+            <span className="text-slate-300">
+              Полярники: <strong className="text-frost">{numPlayers}</strong> / 5
+            </span>
+            {numPlayers < 4 && (
+              <span className="text-hazard-amber font-semibold ml-1">(нужно еще {4 - numPlayers})</span>
+            )}
+          </div>
+          {numPlayers === 4 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-cyan-950/60 border border-frost/30 text-frost text-xs font-bold shadow-sm">
+              <span>🃏 Базовая колода: 35 карт</span>
+            </div>
+          )}
+          {numPlayers === 5 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-amber-950/60 border border-amber-500/40 text-amber-300 text-xs font-bold shadow-sm">
+              <span>🃏 Расширенная колода: 41 карта (+модуль «5»)</span>
+            </div>
           )}
         </div>
       </div>
@@ -98,7 +110,7 @@ export const Lobby: React.FC<LobbyProps> = ({
           <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
             <span>Экипаж полярной экспедиции:</span>
           </h3>
-          {isHost && numPlayers < 12 && (
+          {isHost && numPlayers < 5 && (
             <button
               onClick={onAddBot}
               className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-polar-850 hover:bg-polar-800 border border-white/10 text-slate-300 hover:text-frost text-xs font-medium transition-colors"
@@ -199,7 +211,7 @@ export const Lobby: React.FC<LobbyProps> = ({
           <div className="flex flex-col sm:flex-row items-center gap-3">
             {!canStart && (
               <span className="text-xs text-hazard-amber">
-                Для старта нужно минимум 4 игрока
+                {numPlayers < 4 ? `Для старта нужно 4 или 5 игроков (добавьте ${4 - numPlayers} бота)` : 'Максимум 5 игроков'}
               </span>
             )}
             <button

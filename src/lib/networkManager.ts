@@ -257,7 +257,7 @@ class NetworkManager {
     const defaultSettings: RoomSettings = {
       turnTimerSeconds: 60,
       allowBots: true,
-      maxPlayers: 12,
+      maxPlayers: 5,
       ...settings,
     };
 
@@ -365,7 +365,7 @@ class NetworkManager {
     roomId = roomId.toUpperCase().trim();
     const local = await this.ensureRoomState(roomId);
     if (!local || local.publicState.status !== 'LOBBY') return false;
-    if (local.publicState.players.length >= 12) return false;
+    if (local.publicState.players.length >= local.publicState.settings.maxPlayers) return false;
 
     const botNames = ['Бот Блэр', 'Бот Макриди', 'Бот Чайлдс', 'Бот Коппер', 'Бот Уиндоус', 'Бот Палмер', 'Бот Норис'];
     const botAvatars: AvatarId[] = ['scientist', 'explorer', 'mechanic', 'doctor', 'radio', 'officer'];
@@ -450,7 +450,9 @@ class NetworkManager {
     const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
     if (local.publicState.hostId !== hostPlayerId) return { success: false, error: 'Только командир (хост) может начать игру.' };
-    if (local.publicState.players.length < 4) return { success: false, error: 'Для игры требуется минимум 4 полярника (можно добавить ботов).' };
+    if (local.publicState.players.length !== 4 && local.publicState.players.length !== 5) {
+      return { success: false, error: 'Игра поддерживает строго 4 или 5 полярников (добавьте бота или пригласите друга).' };
+    }
 
     const playerIds = local.publicState.players.map(p => p.id);
     const { playerHands, drawDeck } = setupGameDeck(playerIds);
@@ -479,7 +481,7 @@ class NetworkManager {
     local.fullDrawDeck = drawDeck;
 
     const startPlayer = local.publicState.players[startPlayerIndex];
-    this.addLog(local.publicState, `ВНИМАНИЕ! Экспедиция изолирована. Среди вас бродит НЕЧТО!`, 'WARNING');
+    this.addLog(local.publicState, `ВНИМАНИЕ! Экспедиция изолирована (${playerIds.length} полярников). Среди вас бродит НЕЧТО!`, 'WARNING');
     this.addLog(local.publicState, `Каждому роздано по 4 секретных карты. Первым начинает ${startPlayer.name}.`);
 
     // Фаза первого добора
@@ -488,6 +490,80 @@ class NetworkManager {
     local.publicState.lastUpdated = Date.now();
     await this.saveAndSync(roomId, local);
     return { success: true };
+  }
+
+  // Вспомогательный метод добора карт событий (пропуская панику в сброс)
+  private drawEventCard(local: LocalGameState, priv: PlayerPrivate): GameCard | null {
+    const state = local.publicState;
+    let safety = 0;
+    while (safety++ < 40) {
+      if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
+        if (state.discardPile.length > 0) {
+          local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
+          state.discardPile = [];
+        } else {
+          break;
+        }
+      }
+      const top = local.fullDrawDeck.shift();
+      if (!top) break;
+      state.deckCount = local.fullDrawDeck.length;
+      if (top.category === 'PANIC') {
+        state.discardPile.unshift(top);
+        continue;
+      }
+      priv.cards.push(top);
+      return top;
+    }
+    return null;
+  }
+
+  // Метод выполнения Цепной реакции: одновременная передача 1 карты по кругу
+  private executeChainReaction(local: LocalGameState) {
+    const state = local.publicState;
+    const living = getLivingPlayers(state.players);
+    if (living.length < 2) return;
+
+    const passedCards: { fromId: string; toId: string; card: GameCard; fromRole: Role }[] = [];
+
+    for (let i = 0; i < living.length; i++) {
+      const p = living[i];
+      const priv = local.privateStates[p.id];
+      if (!priv || priv.cards.length === 0) continue;
+
+      const nextIdx = (i + (state.direction === 1 ? 1 : -1) + living.length) % living.length;
+      const targetP = living[nextIdx];
+
+      let cardIdx = -1;
+      if (priv.role === 'THE_THING' || priv.role === 'INFECTED') {
+        cardIdx = priv.cards.findIndex(c => c.code === 'INFECTION');
+      }
+      if (cardIdx === -1) {
+        cardIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'HUMAN'));
+      }
+      if (cardIdx === -1) cardIdx = 0;
+
+      const card = priv.cards.splice(cardIdx, 1)[0];
+      passedCards.push({ fromId: p.id, toId: targetP.id, card, fromRole: priv.role });
+    }
+
+    for (const item of passedCards) {
+      const targetPriv = local.privateStates[item.toId];
+      if (targetPriv) {
+        targetPriv.cards.push(item.card);
+        if (item.card.code === 'INFECTION' && (item.fromRole === 'THE_THING' || item.fromRole === 'INFECTED')) {
+          if (targetPriv.role === 'HUMAN') {
+            targetPriv.role = 'INFECTED';
+            targetPriv.infectedBy = item.fromId;
+          }
+        }
+      }
+    }
+
+    for (const p of state.players) {
+      const priv = local.privateStates[p.id];
+      if (priv) p.handCount = priv.cards.length;
+    }
   }
 
   // Вспомогательный метод: Фаза Добора (Draw Phase)
@@ -527,15 +603,88 @@ class NetworkManager {
         timestamp: Date.now(),
       };
 
-      if (drawnCard.code === 'CHANGE_DIRECTION') {
+      if (drawnCard.code === 'PANIC_OPEN_DOORS') {
+        state.doors = [];
+        this.addLog(state, `🚪 «...Три, четыре... открывайте дверь пошире!» Все заколоченные двери сорваны с петель!`, 'PANIC');
+      } else if (drawnCard.code === 'PANIC_PARTY_5' || drawnCard.code === 'PARTY_OVER') {
+        state.doors = [];
+        state.players.forEach(p => { p.quarantineTurns = 0; });
+        this.addLog(state, `💥 «И ЭТО ВЫ НАЗЫВАЕТЕ ВЕЧЕРИНКОЙ?!» Все двери сорваны с петель, все карантины немедленно сняты!`, 'PANIC');
+
+        const living = getLivingPlayers(state.players);
+        const activeIdx = living.findIndex(p => p.id === currentId);
+        if (activeIdx !== -1) {
+          const ordered: PlayerPublic[] = [];
+          for (let i = 0; i < living.length; i++) {
+            ordered.push(living[(activeIdx + i) % living.length]);
+          }
+          for (let i = 0; i + 1 < ordered.length; i += 2) {
+            const p1 = ordered[i];
+            const p2 = ordered[i + 1];
+            const tempSeat = p1.seatIndex;
+            p1.seatIndex = p2.seatIndex;
+            p2.seatIndex = tempSeat;
+          }
+          this.addLog(state, `🔄 Полярники попарно поменялись местами за столом!`, 'PANIC');
+        }
+      } else if (drawnCard.code === 'PANIC_ONE_TWO_5') {
+        const living = getLivingPlayers(state.players);
+        const activeIdx = living.findIndex(p => p.id === currentId);
+        if (activeIdx !== -1 && living.length >= 4) {
+          const targetP = living[(activeIdx + 3) % living.length];
+          if (targetP && targetP.id !== currentId && targetP.quarantineTurns === 0 && activePlayer.quarantineTurns === 0) {
+            const tempSeat = activePlayer.seatIndex;
+            activePlayer.seatIndex = targetP.seatIndex;
+            targetP.seatIndex = tempSeat;
+            this.addLog(state, `🔄 «Раз, два... Нечто поднялось со дна!» ${activePlayer.name} поменялся местами с ${targetP.name}!`, 'PANIC');
+          }
+        }
+      } else if (drawnCard.code === 'PANIC_GET_AWAY_5') {
+        const others = getLivingPlayers(state.players).filter(p => p.id !== currentId && p.quarantineTurns === 0);
+        if (others.length > 0 && activePlayer.quarantineTurns === 0) {
+          const targetP = others[0];
+          const tempSeat = activePlayer.seatIndex;
+          activePlayer.seatIndex = targetP.seatIndex;
+          targetP.seatIndex = tempSeat;
+          this.addLog(state, `🏃‍♂️ «Убирайся прочь!» ${activePlayer.name} занял место ${targetP.name}!`, 'PANIC');
+        }
+      } else if (drawnCard.code === 'PANIC_FORGETFULNESS') {
+        let discardedCount = 0;
+        while (discardedCount < 3 && activePrivate.cards.length > 1) {
+          const idx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED'));
+          if (idx !== -1) {
+            state.discardPile.unshift(activePrivate.cards.splice(idx, 1)[0]);
+            discardedCount++;
+          } else {
+            break;
+          }
+        }
+        for (let i = 0; i < discardedCount; i++) {
+          this.drawEventCard(local, activePrivate);
+        }
+        activePlayer.handCount = activePrivate.cards.length;
+        this.addLog(state, `🧠 «Забывчивость»! ${activePlayer.name} сбросил ${discardedCount} карт и обновил руку из колоды.`, 'PANIC');
+      } else if (drawnCard.code === 'PANIC_BLIND_DATE') {
+        const swapIdx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED'));
+        if (swapIdx !== -1) {
+          const discarded = activePrivate.cards.splice(swapIdx, 1)[0];
+          state.discardPile.unshift(discarded);
+          this.drawEventCard(local, activePrivate);
+          activePlayer.handCount = activePrivate.cards.length;
+          this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} тайно сменил карту из руки на карту из колоды. Ход завершен!`, 'PANIC');
+        }
+        this.endTurn(local, roomId);
+        return;
+      } else if (drawnCard.code === 'PANIC_CHAIN_REACTION') {
+        this.executeChainReaction(local);
+        this.addLog(state, `⚡ «Цепная реакция»! Все игроки одновременно передали по 1 карте соседу по кругу! Ход завершен.`, 'PANIC');
+        this.endTurn(local, roomId);
+        return;
+      } else if (drawnCard.code === 'CHANGE_DIRECTION') {
         state.direction = state.direction === 1 ? -1 : 1;
         this.addLog(state, `Направление хода изменилось: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'PANIC');
       } else if (drawnCard.code === 'BLIND_FAITH') {
         this.addLog(state, `Слепое доверие заставляет всех быть настороже.`, 'PANIC');
-      } else if (drawnCard.code === 'PARTY_OVER') {
-        state.doors = [];
-        state.players.forEach(p => { p.quarantineTurns = 0; });
-        this.addLog(state, `💥 «И ЭТО ВЫ НАЗЫВАЕТЕ ВЕЧЕРИНКОЙ?!» Все двери сорваны с петель, все карантины немедленно сняты!`, 'PANIC');
       }
 
       this.executeDrawPhase(local, roomId);
@@ -641,9 +790,16 @@ class NetworkManager {
 
       case 'QUARANTINE': {
         if (targetPlayer) {
-          targetPlayer.quarantineTurns = 3;
-          this.addLog(state, `☣️ ${targetPlayer.name} отправлен в КАРАНТИН на 3 хода!`, 'WARNING');
+          targetPlayer.quarantineTurns = 2;
+          this.addLog(state, `☣️ ${targetPlayer.name} отправлен в КАРАНТИН на 2 хода!`, 'WARNING');
         }
+        this.advanceToExchange(local, roomId);
+        break;
+      }
+
+      case 'LOOK_AROUND': {
+        state.direction = state.direction === 1 ? -1 : 1;
+        this.addLog(state, `👀 ${activePlayer.name} сыграл «Гляди по сторонам»! Очередность хода и направление обмена меняются: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'INFO');
         this.advanceToExchange(local, roomId);
         break;
       }
@@ -1370,7 +1526,7 @@ class NetworkManager {
     const nonCriticalCards = botPrivate.cards.filter(c => c.code !== 'THE_THING');
     const actionCard = nonCriticalCards.find(c => c.category === 'ACTION' || c.category === 'OBSTACLE');
 
-    if (actionCard && actionCard.code === 'WHISKEY') {
+    if (actionCard && (actionCard.code === 'WHISKEY' || actionCard.code === 'LOOK_AROUND')) {
       this.playCard(roomId, currentId, actionCard.id);
     } else {
       const discardCandidate = nonCriticalCards.find(c => c.code !== 'INFECTION' || botPrivate.role !== 'INFECTED') || nonCriticalCards[0];

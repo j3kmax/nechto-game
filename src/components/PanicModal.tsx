@@ -28,10 +28,23 @@ export const PanicModal: React.FC<PanicModalProps> = ({ panicEvent, onClose }) =
 
   const getEffectDetails = (code: string) => {
     switch (code) {
+      case 'PANIC_OPEN_DOORS':
+        return 'Все сыгранные карты «Заколоченная дверь» сорваны с петель и сброшены!';
+      case 'PANIC_FORGETFULNESS':
+        return 'Игрок сбросил до 3 карт с руки и взял столько же новых карт событий!';
+      case 'PANIC_BLIND_DATE':
+        return 'Игрок поменял 1 карту с руки на верхнюю карту колоды. Ход завершен!';
+      case 'PANIC_CHAIN_REACTION':
+        return 'Все игроки одновременно передали по 1 карте соседу по порядку хода! Ход завершен.';
+      case 'PANIC_ONE_TWO_5':
+        return 'Игрок поменялся местами с третьим от себя полярником за столом!';
+      case 'PANIC_PARTY_5':
+      case 'PARTY_OVER':
+        return 'Все заколоченные двери сорваны с петель, все карантины сняты, игроки попарно поменялись местами!';
+      case 'PANIC_GET_AWAY_5':
+        return 'Игрок поменялся местами с другим полярником за столом!';
       case 'CHANGE_DIRECTION':
         return 'Направление передачи ходов и обмена картами мгновенно изменено на противоположное!';
-      case 'PARTY_OVER':
-        return 'Все заколоченные двери сорваны с петель, все игроки освобождены из карантина!';
       case 'BLIND_FAITH':
         return 'Игроки теряют бдительность. Атмосфера паранойи усиливается!';
       default:

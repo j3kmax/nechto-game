@@ -109,8 +109,8 @@ export function validatePlayCard(
     return { valid: false, error: 'Погибшие игроки не могут совершать действий.' };
   }
 
-  if (activePlayer.quarantineTurns > 0 && card.code !== 'PERSEVERANCE' && card.code !== 'WHISKEY') {
-    return { valid: false, error: 'Вы находитесь в карантине и можете только сбросить карту.' };
+  if (activePlayer.quarantineTurns > 0) {
+    return { valid: false, error: 'Вы находитесь в карантине и можете только сбросить карту (стр. 13 правил).' };
   }
 
   if (card.category === 'THE_THING') {
@@ -221,6 +221,7 @@ export function validatePlayCard(
       return { valid: true };
     }
 
+    case 'LOOK_AROUND':
     case 'CHANGE_DIRECTION':
     case 'WHISKEY':
     case 'PERSEVERANCE':

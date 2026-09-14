@@ -20,7 +20,11 @@ import {
   Sparkles,
   Footprints,
   Bomb,
-  Info
+  Info,
+  DoorOpen,
+  RotateCw,
+  Zap,
+  EyeOff
 } from 'lucide-react';
 import { soundFx } from '@/lib/soundEffects';
 import { CardDetailModal } from './CardDetailModal';
@@ -195,6 +199,71 @@ export const getCardVisual = (code: string) => {
         border: 'border-cyan-500/60 shadow-cyan-950/40',
         badge: 'bg-cyan-950 text-cyan-300 border-cyan-500/50',
         label: 'ПРЕПЯТСТВИЕ',
+      };
+    case 'LOOK_AROUND':
+    case 'CHANGE_DIRECTION':
+      return {
+        icon: <RotateCw className="w-8 h-8 text-amber-400" />,
+        bg: 'bg-gradient-to-b from-amber-950/50 to-polar-950',
+        border: 'border-amber-500/50 shadow-amber-950/40',
+        badge: 'bg-amber-950 text-amber-300 border-amber-500/50',
+        label: 'ДЕЙСТВИЕ',
+      };
+    case 'PANIC_FORGETFULNESS':
+      return {
+        icon: <Sparkles className="w-8 h-8 text-fuchsia-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-fuchsia-950/60 to-polar-950',
+        border: 'border-fuchsia-500/60 shadow-fuchsia-950/40',
+        badge: 'bg-fuchsia-950 text-fuchsia-300 border-fuchsia-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_BLIND_DATE':
+      return {
+        icon: <EyeOff className="w-8 h-8 text-fuchsia-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-fuchsia-950/60 to-polar-950',
+        border: 'border-fuchsia-500/60 shadow-fuchsia-950/40',
+        badge: 'bg-fuchsia-950 text-fuchsia-300 border-fuchsia-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_CHAIN_REACTION':
+      return {
+        icon: <Zap className="w-8 h-8 text-fuchsia-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-fuchsia-950/60 to-polar-950',
+        border: 'border-fuchsia-500/60 shadow-fuchsia-950/40',
+        badge: 'bg-fuchsia-950 text-fuchsia-300 border-fuchsia-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_OPEN_DOORS':
+      return {
+        icon: <DoorOpen className="w-8 h-8 text-fuchsia-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-fuchsia-950/60 to-polar-950',
+        border: 'border-fuchsia-500/60 shadow-fuchsia-950/40',
+        badge: 'bg-fuchsia-950 text-fuchsia-300 border-fuchsia-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_ONE_TWO_5':
+      return {
+        icon: <ArrowLeftRight className="w-8 h-8 text-pink-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-pink-950/60 to-polar-950',
+        border: 'border-pink-500/60 shadow-pink-950/40',
+        badge: 'bg-pink-950 text-pink-300 border-pink-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_PARTY_5':
+      return {
+        icon: <Bomb className="w-8 h-8 text-pink-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-pink-950/60 to-polar-950',
+        border: 'border-pink-500/60 shadow-pink-950/40',
+        badge: 'bg-pink-950 text-pink-300 border-pink-500/50',
+        label: 'ПАНИКА',
+      };
+    case 'PANIC_GET_AWAY_5':
+      return {
+        icon: <Footprints className="w-8 h-8 text-pink-400 animate-pulse" />,
+        bg: 'bg-gradient-to-b from-pink-950/60 to-polar-950',
+        border: 'border-pink-500/60 shadow-pink-950/40',
+        badge: 'bg-pink-950 text-pink-300 border-pink-500/50',
+        label: 'ПАНИКА',
       };
     default:
       return {

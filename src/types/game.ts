@@ -27,9 +27,17 @@ export type CardCode =
   | 'FEAR'             // Страх
   | 'BARRED_DOOR'      // Заколоченная дверь
   | 'QUARANTINE'       // Карантин
-  | 'CHANGE_DIRECTION' // Гляди по сторонам / Смена направления
-  | 'BLIND_FAITH'      // Слепое доверие
-  | 'PARTY_OVER';      // И это вы называете вечеринкой?
+  | 'LOOK_AROUND'          // Гляди по сторонам (действие)
+  | 'PANIC_FORGETFULNESS'  // Забывчивость (паника)
+  | 'PANIC_BLIND_DATE'     // Свидание вслепую (паника)
+  | 'PANIC_CHAIN_REACTION' // Цепная реакция (паника)
+  | 'PANIC_OPEN_DOORS'     // ...Три, четыре... открывайте дверь пошире! (паника)
+  | 'PANIC_ONE_TWO_5'      // Раз, два... Нечто поднялось со дна! (паника, 5 игроков)
+  | 'PANIC_PARTY_5'        // И это вы называете вечеринкой? (паника, 5 игроков)
+  | 'PANIC_GET_AWAY_5'     // Убирайся прочь! (паника, 5 игроков)
+  | 'CHANGE_DIRECTION'     // Совместимость
+  | 'BLIND_FAITH'          // Совместимость
+  | 'PARTY_OVER';          // Совместимость
 
 export interface GameCard {
   id: string;
