@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Публичное состояние комнаты: доступно всем игрокам в комнате для чтения
+    // Содержит только публичные данные (имена, рассадку, количество карт, статус стола)
+    match /rooms/{roomId}/public/{document=**} {
+      allow read: if true;
+      allow write: if request.auth != null || true; // Для прототипа или с авторизацией
+    }
+    
+    // Секретные руки и роли игроков (Защита от читерства и вскрытия в DevTools):
+    // Каждый игрок может прочитать ТОЛЬКО свои собственные карты и свою тайную роль!
+    match /rooms/{roomId}/private/{playerId} {
+      allow read, write: if request.auth != null && request.auth.uid == playerId;
+    }
+  }
+}
