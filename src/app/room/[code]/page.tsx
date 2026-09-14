@@ -168,6 +168,19 @@ export default function RoomPage() {
     await networkManager.transferHost(roomCode, currentUserId, newHostId);
   };
 
+  const handleRestartLobby = async () => {
+    try {
+      soundFx.playCardDraw();
+      const res = await networkManager.resetToLobby(roomCode, currentUserId);
+      if (!res.success) {
+        alert(res.error || 'Ошибка перезапуска лобби.');
+      }
+    } catch (e: unknown) {
+      console.error('Ошибка перезапуска:', e);
+      alert('Ошибка перезапуска: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   // ИГРОВЫЕ ДЕЙСТВИЯ (ACTION PHASE)
   const handlePlayCardClick = async (card: GameCard) => {
     const targetedCodes = ['FLAMETHROWER', 'AXE', 'ANALYSIS', 'SUSPICION', 'BARRED_DOOR', 'QUARANTINE', 'SWITCH_PLACES', 'SEDUCTION'];
@@ -450,11 +463,9 @@ export default function RoomPage() {
           winner={roomState.winner}
           reason={roomState.winningRoleReason}
           players={roomState.players}
+          finalRoles={roomState.finalRoles}
           isHost={isHost}
-          onRestartLobby={() => {
-            roomState.status = 'LOBBY';
-            networkManager.subscribeToRoom(roomCode, (s) => setRoomState(s));
-          }}
+          onRestartLobby={handleRestartLobby}
         />
       )}
 

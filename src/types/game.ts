@@ -129,5 +129,6 @@ export interface RoomPublicState {
     cards: GameCard[];
     title: string;
   } | null;
+  finalRoles?: Record<string, Role>;
   lastUpdated: number;
 }

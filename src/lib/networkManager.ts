@@ -6,7 +6,8 @@ import {
   RoomSettings, 
   AvatarId, 
   GameLogEntry,
-  CardCode
+  CardCode,
+  Role
 } from '@/types/game';
 import { setupGameDeck } from '@/game/deckBuilder';
 import { 
@@ -858,6 +859,11 @@ class NetworkManager {
       state.status = 'GAME_OVER';
       state.winner = winCheck.winner;
       state.winningRoleReason = winCheck.reason;
+      const roles: Record<string, Role> = {};
+      for (const p of state.players) {
+        roles[p.id] = local.privateStates[p.id]?.role || 'HUMAN';
+      }
+      state.finalRoles = roles;
       this.addLog(state, `🏆 ИГРА ОКОНЧЕНА! ${winCheck.reason}`, 'WARNING');
     } else {
       this.endTurn(local, roomId);
@@ -940,6 +946,11 @@ class NetworkManager {
           state.status = 'GAME_OVER';
           state.winner = winCheck.winner;
           state.winningRoleReason = winCheck.reason;
+          const roles: Record<string, Role> = {};
+          for (const p of state.players) {
+            roles[p.id] = local.privateStates[p.id]?.role || 'HUMAN';
+          }
+          state.finalRoles = roles;
           this.addLog(state, `🏆 ${winCheck.reason}`, 'WARNING');
         } else {
           this.endTurn(local, roomId);
@@ -956,6 +967,50 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local);
+    return { success: true };
+  }
+
+  // 12. Перезапуск в лобби (Реванш)
+  public async resetToLobby(roomId: string, hostPlayerId: string): Promise<{ success: boolean; error?: string }> {
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
+    if (!local) return { success: false, error: 'Комната не найдена.' };
+    if (local.publicState.hostId !== hostPlayerId) return { success: false, error: 'Только командир (хост) может начать новую игру.' };
+
+    const state = local.publicState;
+    state.status = 'LOBBY';
+    state.phase = 'LOBBY';
+    state.winner = null;
+    state.winningRoleReason = undefined;
+    state.finalRoles = undefined;
+    state.roundNumber = 1;
+    state.doors = [];
+    state.discardPile = [];
+    state.deckCount = 0;
+    state.pendingDefense = null;
+    state.revealedCards = null;
+
+    state.players.forEach(p => {
+      p.isDead = false;
+      p.quarantineTurns = 0;
+      p.handCount = 0;
+    });
+
+    for (const pId in local.privateStates) {
+      local.privateStates[pId] = {
+        role: 'HUMAN',
+        cards: [],
+      };
+    }
+
+    local.fullDrawDeck = [];
+    local.offeredExchangeCard = undefined;
+    local.forcedExchangeTargetId = undefined;
+
+    this.addLog(state, `Экспедиция завершена. Станция возвращена в режим подготовки к новому выходу.`);
+    state.lastUpdated = Date.now();
+
     await this.saveAndSync(roomId, local);
     return { success: true };
   }

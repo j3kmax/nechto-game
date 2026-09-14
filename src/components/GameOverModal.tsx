@@ -10,6 +10,7 @@ interface GameOverModalProps {
   winner: GameWinner;
   reason?: string;
   players: PlayerPublic[];
+  finalRoles?: Record<string, Role>;
   onRestartLobby: () => void;
   isHost: boolean;
 }
@@ -18,6 +19,7 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
   winner,
   reason,
   players,
+  finalRoles,
   onRestartLobby,
   isHost,
 }) => {
@@ -71,6 +73,14 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
           </h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             {players.map((p) => {
+              const role = finalRoles ? finalRoles[p.id] : undefined;
+              let roleBadge = { text: 'ЧЕЛОВЕК', style: 'bg-cyan-950/80 text-frost border-cyan-500/40' };
+              if (role === 'THE_THING') {
+                roleBadge = { text: 'НЕЧТО ☣️', style: 'bg-red-950/90 text-red-400 border-red-500/60 font-black animate-pulse' };
+              } else if (role === 'INFECTED') {
+                roleBadge = { text: 'ЗАРАЖЕН ⚠️', style: 'bg-amber-950/90 text-amber-400 border-amber-500/60 font-bold' };
+              }
+
               return (
                 <div
                   key={p.id}
@@ -83,10 +93,16 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
                     <div className="text-left">
                       <div className="text-xs font-bold text-slate-200">{p.name}</div>
                       <div className="text-[10px] text-slate-500">
-                        {p.isDead ? '💀 Погиб' : 'Выжил'}
+                        {p.isDead ? '💀 Погиб' : '🛡️ Выжил'}
                       </div>
                     </div>
                   </div>
+
+                  {role && (
+                    <span className={`text-[10px] uppercase px-2 py-0.5 rounded-lg border tracking-wider font-semibold ${roleBadge.style}`}>
+                      {roleBadge.text}
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -96,8 +112,9 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
         {/* Кнопка реванша */}
         {isHost ? (
           <button
+            type="button"
             onClick={onRestartLobby}
-            className="flex items-center gap-2 px-8 py-3 rounded-2xl bg-frost hover:bg-cyan-400 text-polar-950 font-black text-sm uppercase tracking-wider transition-all shadow-xl shadow-frost/30 hover:scale-105"
+            className="flex items-center gap-2 px-8 py-3 rounded-2xl bg-frost hover:bg-cyan-400 text-polar-950 font-black text-sm uppercase tracking-wider transition-all shadow-xl shadow-frost/30 hover:scale-105 cursor-pointer active:scale-95"
           >
             <RotateCcw className="w-4 h-4" />
             Вернуться в лобби для реванша
