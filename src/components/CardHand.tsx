@@ -22,6 +22,7 @@ import {
   Info
 } from 'lucide-react';
 import { soundFx } from '@/lib/soundEffects';
+import { CardDetailModal } from './CardDetailModal';
 
 interface CardHandProps {
   cards: GameCard[];
@@ -190,6 +191,7 @@ export const CardHand: React.FC<CardHandProps> = ({
   isExchangeTarget,
 }) => {
   const [hoveredCardId, setHoveredCardId] = useState<string | null>(null);
+  const [inspectedCard, setInspectedCard] = useState<GameCard | null>(null);
 
   // Определение роли для секретного бейджа
   let roleBadge = {
@@ -250,12 +252,24 @@ export const CardHand: React.FC<CardHandProps> = ({
                 isHovered ? '-translate-y-4 scale-105 z-30 shadow-2xl ring-2 ring-frost/50' : 'hover:-translate-y-2'
               }`}
             >
-              {/* Верх: категория и иконка */}
+              {/* Верх: категория, иконка инфо и название */}
               <div>
                 <div className="flex items-center justify-between gap-1 mb-1">
                   <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider ${visual.badge}`}>
                     {visual.label}
                   </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      soundFx.playCardDraw();
+                      setInspectedCard(card);
+                    }}
+                    className="p-1 rounded-md text-slate-400 hover:text-frost hover:bg-white/10 transition-colors cursor-pointer"
+                    title="Посмотреть описание и правила карты"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                  </button>
                 </div>
                 <h4 className="text-xs sm:text-sm font-extrabold text-slate-100 leading-tight">
                   {card.name}
@@ -263,8 +277,16 @@ export const CardHand: React.FC<CardHandProps> = ({
               </div>
 
               {/* Центр: иллюстрация/символ */}
-              <div className="flex items-center justify-center py-2">
-                <div className="p-3 rounded-full bg-black/40 border border-white/5 shadow-inner">
+              <div 
+                className="flex items-center justify-center py-2"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  soundFx.playCardDraw();
+                  setInspectedCard(card);
+                }}
+                title="Нажмите для просмотра правил карты"
+              >
+                <div className="p-3 rounded-full bg-black/40 border border-white/5 shadow-inner hover:scale-110 transition-transform">
                   {visual.icon}
                 </div>
               </div>
@@ -275,11 +297,12 @@ export const CardHand: React.FC<CardHandProps> = ({
                   <div className="flex flex-col gap-1 animate-in fade-in duration-150">
                     {isPlayable && (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onPlayCard(card);
                         }}
-                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-frost hover:bg-cyan-400 text-polar-950 transition-colors shadow"
+                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-frost hover:bg-cyan-400 text-polar-950 transition-colors shadow cursor-pointer active:scale-95"
                       >
                         Сыграть
                       </button>
@@ -287,11 +310,12 @@ export const CardHand: React.FC<CardHandProps> = ({
 
                     {isDiscardable && (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onDiscardCard(card);
                         }}
-                        className="w-full py-1 text-[11px] font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors border border-white/10"
+                        className="w-full py-1 text-[11px] font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors border border-white/10 cursor-pointer active:scale-95"
                       >
                         Сбросить
                       </button>
@@ -299,11 +323,12 @@ export const CardHand: React.FC<CardHandProps> = ({
 
                     {isExchangeableOffer && (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onOfferExchangeCard(card);
                         }}
-                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-polar-950 transition-colors shadow"
+                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-amber-500 hover:bg-amber-400 text-polar-950 transition-colors shadow cursor-pointer active:scale-95"
                       >
                         Передать
                       </button>
@@ -311,11 +336,12 @@ export const CardHand: React.FC<CardHandProps> = ({
 
                     {isExchangeableResponse && (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onRespondExchangeCard(card);
                         }}
-                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-emerald-500 hover:bg-emerald-400 text-polar-950 transition-colors shadow"
+                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-emerald-500 hover:bg-emerald-400 text-polar-950 transition-colors shadow cursor-pointer active:scale-95"
                       >
                         Отдать в ответ
                       </button>
@@ -323,21 +349,28 @@ export const CardHand: React.FC<CardHandProps> = ({
 
                     {isDefendable && (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onDefenseCard(card);
                         }}
-                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-emerald-400 hover:bg-emerald-300 text-polar-950 transition-colors shadow animate-pulse"
+                        className="w-full py-1 text-[11px] font-bold rounded-lg bg-emerald-400 hover:bg-emerald-300 text-polar-950 transition-colors shadow animate-pulse cursor-pointer active:scale-95"
                       >
                         Защититься!
                       </button>
                     )}
 
-                    {!isPlayable && !isDiscardable && !isExchangeableOffer && !isExchangeableResponse && !isDefendable && (
-                      <p className="text-[10px] text-slate-400 text-center line-clamp-2">
-                        {card.description}
-                      </p>
-                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        soundFx.playCardDraw();
+                        setInspectedCard(card);
+                      }}
+                      className="w-full py-0.5 text-[10px] font-semibold text-slate-400 hover:text-frost flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <Info className="w-3 h-3" /> Описание
+                    </button>
                   </div>
                 ) : (
                   <p className="text-[10px] text-slate-400 line-clamp-2 leading-tight">
@@ -350,6 +383,13 @@ export const CardHand: React.FC<CardHandProps> = ({
           );
         })}
       </div>
+
+      {/* Модальное окно просмотра правил карты */}
+      <CardDetailModal
+        card={inspectedCard}
+        isOpen={!!inspectedCard}
+        onClose={() => setInspectedCard(null)}
+      />
 
     </div>
   );

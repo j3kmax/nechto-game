@@ -53,6 +53,7 @@ export default function RoomPage() {
   // Модальные окна и интеракции
   const [isRulesOpen, setIsRulesOpen] = useState(false);
   const [targetCardToPlay, setTargetCardToPlay] = useState<GameCard | null>(null);
+  const [dismissedRevealedKey, setDismissedRevealedKey] = useState<string | null>(null);
   const [needJoinPrompt, setNeedJoinPrompt] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joinLoading, setJoinLoading] = useState(false);
@@ -227,6 +228,25 @@ export default function RoomPage() {
     soundFx.playCardDraw();
     await networkManager.respondExchange(roomCode, currentUserId, card.id);
   };
+
+  const handleCloseRevealedCards = async () => {
+    soundFx.playCardDraw();
+    if (roomState?.revealedCards) {
+      const key = `${roomState.revealedCards.title}_${roomState.revealedCards.targetPlayerId || 'all'}_${roomState.revealedCards.cards.length}`;
+      setDismissedRevealedKey(key);
+    }
+    setRoomState(prev => prev ? { ...prev, revealedCards: null } : null);
+    await networkManager.clearRevealedCards(roomCode);
+  };
+
+  const currentRevealedKey = roomState?.revealedCards
+    ? `${roomState.revealedCards.title}_${roomState.revealedCards.targetPlayerId || 'all'}_${roomState.revealedCards.cards.length}`
+    : null;
+  const isRevealedCardsVisible = Boolean(
+    roomState?.revealedCards &&
+    (!roomState.revealedCards.targetPlayerId || roomState.revealedCards.targetPlayerId === currentUserId) &&
+    currentRevealedKey !== dismissedRevealedKey
+  );
 
   // ЗАЩИТА (DEFENSE)
   const handlePlayDefense = async (card: GameCard) => {
@@ -446,14 +466,11 @@ export default function RoomPage() {
       )}
 
       {/* Модальное окно раскрытых карт (Виски, Анализ крови, Подозрение, Страх) */}
-      {roomState.revealedCards && (!roomState.revealedCards.targetPlayerId || roomState.revealedCards.targetPlayerId === currentUserId) && (
+      {isRevealedCardsVisible && roomState.revealedCards && (
         <RevealedCardsModal
           title={roomState.revealedCards.title}
           cards={roomState.revealedCards.cards}
-          onClose={() => {
-            // Очищаем раскрытые карты
-            if (roomState) roomState.revealedCards = null;
-          }}
+          onClose={handleCloseRevealedCards}
         />
       )}
 

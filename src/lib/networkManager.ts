@@ -179,6 +179,68 @@ class NetworkManager {
     }
   }
 
+  // Получить секретное состояние игрока (из памяти или Firestore)
+  public async getPlayerPrivate(roomId: string, playerId: string): Promise<PlayerPrivate | null> {
+    roomId = roomId.toUpperCase().trim();
+    const local = this.localRooms.get(roomId);
+    if (local?.privateStates[playerId]) {
+      return local.privateStates[playerId];
+    }
+    if (isFirebaseConfigured && db) {
+      try {
+        const snap = await getDoc(doc(db, 'rooms', roomId, 'private', playerId));
+        if (snap.exists()) {
+          const priv = snap.data() as PlayerPrivate;
+          if (local) {
+            local.privateStates[playerId] = priv;
+          }
+          return priv;
+        }
+      } catch (err) {
+        console.warn(`[Firebase] getPlayerPrivate error for ${playerId}:`, err);
+      }
+    }
+    return null;
+  }
+
+  // Получить секретные состояния всех игроков (для проверки условий победы)
+  public async getAllPlayerPrivates(roomId: string, players: PlayerPublic[]): Promise<Record<string, PlayerPrivate>> {
+    roomId = roomId.toUpperCase().trim();
+    const local = this.localRooms.get(roomId);
+    const result: Record<string, PlayerPrivate> = { ...(local?.privateStates || {}) };
+
+    if (isFirebaseConfigured && db) {
+      const firestore = db;
+      try {
+        const missingPlayers = players.filter(p => !result[p.id]);
+        if (missingPlayers.length > 0) {
+          const promises = missingPlayers.map(async (p) => {
+            const snap = await getDoc(doc(firestore, 'rooms', roomId, 'private', p.id));
+            if (snap.exists()) {
+              const priv = snap.data() as PlayerPrivate;
+              result[p.id] = priv;
+              if (local) local.privateStates[p.id] = priv;
+            }
+          });
+          await Promise.all(promises);
+        }
+      } catch (err) {
+        console.warn('[Firebase] getAllPlayerPrivates error:', err);
+      }
+    }
+    return result;
+  }
+
+  // Очистить раскрытые карты (закрытие модального окна)
+  public async clearRevealedCards(roomId: string): Promise<void> {
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
+    if (!local) return;
+    local.publicState.revealedCards = null;
+    local.publicState.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local);
+  }
+
   // 1. Создание новой комнаты
   public async createRoom(
     hostName: string, 
@@ -564,11 +626,18 @@ class NetworkManager {
 
       case 'ANALYSIS': {
         if (targetPlayer) {
-          const targetCards = local.privateStates[targetPlayer.id]?.cards || [];
+          let targetCards = local.privateStates[targetPlayer.id]?.cards;
+          if (!targetCards || targetCards.length === 0) {
+            const priv = await this.getPlayerPrivate(roomId, targetPlayer.id);
+            if (priv) {
+              local.privateStates[targetPlayer.id] = priv;
+              targetCards = priv.cards;
+            }
+          }
           state.revealedCards = {
             fromPlayerId: targetPlayer.id,
             targetPlayerId: playerId,
-            cards: targetCards,
+            cards: targetCards || [],
             title: `Анализ крови: карты игрока ${targetPlayer.name}`,
           };
           this.addLog(state, `🔬 ${activePlayer.name} провёл анализ крови у ${targetPlayer.name}.`, 'INFO');
@@ -579,9 +648,17 @@ class NetworkManager {
 
       case 'SUSPICION': {
         if (targetPlayer) {
-          const targetCards = local.privateStates[targetPlayer.id]?.cards || [];
-          if (targetCards.length > 0) {
-            const randomCard = targetCards[Math.floor(Math.random() * targetCards.length)];
+          let targetCards = local.privateStates[targetPlayer.id]?.cards;
+          if (!targetCards || targetCards.length === 0) {
+            const priv = await this.getPlayerPrivate(roomId, targetPlayer.id);
+            if (priv) {
+              local.privateStates[targetPlayer.id] = priv;
+              targetCards = priv.cards;
+            }
+          }
+          const cardsList = targetCards || [];
+          if (cardsList.length > 0) {
+            const randomCard = cardsList[Math.floor(Math.random() * cardsList.length)];
             state.revealedCards = {
               fromPlayerId: targetPlayer.id,
               targetPlayerId: playerId,
@@ -627,6 +704,13 @@ class NetworkManager {
       }
 
       case 'PERSEVERANCE': {
+        if (!local.fullDrawDeck || local.fullDrawDeck.length < 3) {
+          if (state.discardPile.length > 0) {
+            local.fullDrawDeck = [...(local.fullDrawDeck || []), ...state.discardPile].sort(() => Math.random() - 0.5);
+            state.discardPile = [];
+            this.addLog(state, `Колода пополнена из стопки сброса для поиска снабжения.`);
+          }
+        }
         const fullDeck = local.fullDrawDeck;
         if (fullDeck && fullDeck.length >= 3) {
           const extraCards = fullDeck.splice(0, 3);
@@ -754,8 +838,16 @@ class NetworkManager {
     const validation = validateExchangeCard(card, activePrivate);
     if (!validation.valid) return { success: false, error: validation.error };
 
-    const neighbors = getPlayerNeighbors(state.players, playerId, state.direction, state.doors);
-    const targetNeighbor = neighbors.targetNeighbor;
+    const forcedTargetId = local.forcedExchangeTargetId;
+    let targetNeighbor: PlayerPublic | null = null;
+    if (forcedTargetId) {
+      targetNeighbor = state.players.find(p => p.id === forcedTargetId) || null;
+      delete local.forcedExchangeTargetId;
+    } else {
+      const neighbors = getPlayerNeighbors(state.players, playerId, state.direction, state.doors);
+      targetNeighbor = neighbors.targetNeighbor;
+    }
+
     if (!targetNeighbor) return { success: false, error: 'Нет доступного соседа для обмена.' };
 
     local.offeredExchangeCard = {
@@ -764,7 +856,11 @@ class NetworkManager {
       card,
     };
 
-    const targetPrivate = local.privateStates[targetNeighbor.id];
+    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetNeighbor.id];
+    if (!targetPrivate) {
+      targetPrivate = await this.getPlayerPrivate(roomId, targetNeighbor.id);
+      if (targetPrivate) local.privateStates[targetNeighbor.id] = targetPrivate;
+    }
     const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR');
 
     if (hasDefense) {
@@ -813,8 +909,16 @@ class NetworkManager {
       return { success: false, error: 'Предложение обмена не адресовано вам.' };
     }
 
-    const targetPrivate = local.privateStates[targetPlayerId];
-    const sourcePrivate = local.privateStates[offer.fromPlayerId];
+    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
+    if (!targetPrivate) {
+      targetPrivate = await this.getPlayerPrivate(roomId, targetPlayerId);
+      if (targetPrivate) local.privateStates[targetPlayerId] = targetPrivate;
+    }
+    let sourcePrivate: PlayerPrivate | null | undefined = local.privateStates[offer.fromPlayerId];
+    if (!sourcePrivate) {
+      sourcePrivate = await this.getPlayerPrivate(roomId, offer.fromPlayerId);
+      if (sourcePrivate) local.privateStates[offer.fromPlayerId] = sourcePrivate;
+    }
     if (!targetPrivate || !sourcePrivate) return { success: false, error: 'Данные игроков не найдены.' };
 
     const cardIndex = targetPrivate.cards.findIndex(c => c.id === cardId);
@@ -854,14 +958,15 @@ class NetworkManager {
     local.offeredExchangeCard = undefined;
     state.pendingDefense = null;
 
-    const winCheck = evaluateWinConditions(state.players, local.privateStates);
+    const allPrivates = await this.getAllPlayerPrivates(roomId, state.players);
+    const winCheck = evaluateWinConditions(state.players, allPrivates);
     if (winCheck.gameOver) {
       state.status = 'GAME_OVER';
       state.winner = winCheck.winner;
       state.winningRoleReason = winCheck.reason;
       const roles: Record<string, Role> = {};
       for (const p of state.players) {
-        roles[p.id] = local.privateStates[p.id]?.role || 'HUMAN';
+        roles[p.id] = allPrivates[p.id]?.role || 'HUMAN';
       }
       state.finalRoles = roles;
       this.addLog(state, `🏆 ИГРА ОКОНЧЕНА! ${winCheck.reason}`, 'WARNING');
@@ -941,14 +1046,15 @@ class NetworkManager {
 
         state.pendingDefense = null;
 
-        const winCheck = evaluateWinConditions(state.players, local.privateStates);
+        const allPrivates = await this.getAllPlayerPrivates(roomId, state.players);
+        const winCheck = evaluateWinConditions(state.players, allPrivates);
         if (winCheck.gameOver) {
           state.status = 'GAME_OVER';
           state.winner = winCheck.winner;
           state.winningRoleReason = winCheck.reason;
           const roles: Record<string, Role> = {};
           for (const p of state.players) {
-            roles[p.id] = local.privateStates[p.id]?.role || 'HUMAN';
+            roles[p.id] = allPrivates[p.id]?.role || 'HUMAN';
           }
           state.finalRoles = roles;
           this.addLog(state, `🏆 ${winCheck.reason}`, 'WARNING');
