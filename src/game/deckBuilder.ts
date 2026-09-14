@@ -111,9 +111,9 @@ export function setupGameDeck(playerIds: string[]): DeckBuildResult {
     drawDeckPool.push(generateCard('INFECTION', cardSeq++));
   }
 
-  // Добавляем карты Паники
-  const panicCount = Math.max(2, Math.floor(numPlayers * 0.5));
-  for (let i = 0; i < panicCount; i++) {
+  // Добавляем карты Паники по официальным правилам (около 20-30% колоды добора)
+  const panicMultiplier = Math.max(3, Math.floor(numPlayers * 0.8));
+  for (let i = 0; i < panicMultiplier; i++) {
     drawDeckPool.push(generateCard('CHANGE_DIRECTION', cardSeq++));
     drawDeckPool.push(generateCard('BLIND_FAITH', cardSeq++));
     drawDeckPool.push(generateCard('PARTY_OVER', cardSeq++));

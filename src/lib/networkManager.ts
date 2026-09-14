@@ -77,7 +77,7 @@ class NetworkManager {
   }
 
   // Централизованное сохранение и синхронизация (LocalStorage + BroadcastChannel + Firestore)
-  private async saveAndSync(roomId: string, state: LocalGameState) {
+  private async saveAndSync(roomId: string, state: LocalGameState, modifiedPlayerIds?: string[]) {
     roomId = roomId.toUpperCase().trim();
     this.localRooms.set(roomId, state);
 
@@ -103,8 +103,12 @@ class NetworkManager {
         const cleanPublic = cleanForFirestore(state.publicState);
         promises.push(setDoc(doc(db, 'rooms', roomId, 'public', 'state'), cleanPublic));
 
-        // 2. Секретные карты каждого игрока
-        for (const pId in state.privateStates) {
+        // 2. Секретные карты каждого игрока (сохраняем ТОЛЬКО затронутых игроков, чтобы не перезаписывать чужие руки)
+        const targetIds = modifiedPlayerIds && modifiedPlayerIds.length > 0 
+          ? modifiedPlayerIds 
+          : Object.keys(state.privateStates);
+
+        for (const pId of targetIds) {
           if (state.privateStates[pId]) {
             const cleanPriv = cleanForFirestore(state.privateStates[pId]);
             promises.push(setDoc(doc(db, 'rooms', roomId, 'private', pId), cleanPriv));
@@ -516,6 +520,13 @@ class NetworkManager {
       this.addLog(state, `ПАНИКА! ${activePlayer.name} вытянул карту паники «${drawnCard.name}»!`, 'PANIC');
       state.discardPile.unshift(drawnCard);
 
+      state.panicEvent = {
+        card: drawnCard,
+        playerId: currentId,
+        playerName: activePlayer.name,
+        timestamp: Date.now(),
+      };
+
       if (drawnCard.code === 'CHANGE_DIRECTION') {
         state.direction = state.direction === 1 ? -1 : 1;
         this.addLog(state, `Направление хода изменилось: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'PANIC');
@@ -559,7 +570,11 @@ class NetworkManager {
     if (state.phase !== 'ACTION') return { success: false, error: 'Сейчас нельзя разыгрывать карты.' };
 
     const activePlayer = state.players.find(p => p.id === playerId);
-    const activePrivate = local.privateStates[playerId];
+    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[playerId];
+    if (!activePrivate) {
+      activePrivate = await this.getPlayerPrivate(roomId, playerId);
+      if (activePrivate) local.privateStates[playerId] = activePrivate;
+    }
     if (!activePlayer || !activePrivate) return { success: false, error: 'Игрок не найден.' };
 
     const cardIndex = activePrivate.cards.findIndex(c => c.id === cardId);
@@ -588,7 +603,7 @@ class NetworkManager {
           actionCard: card,
           actionType: 'ATTACK',
           expiresAt: Date.now() + 15000,
-          allowedDefenseCodes: ['NO_BARBECUE', 'MISSED'],
+          allowedDefenseCodes: ['NO_BARBECUE'],
         };
         state.phase = 'DEFENSE_WAIT';
         
@@ -763,7 +778,7 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, [playerId]);
     return { success: true };
   }
 
@@ -779,7 +794,11 @@ class NetworkManager {
     }
 
     const activePlayer = state.players.find(p => p.id === playerId);
-    const activePrivate = local.privateStates[playerId];
+    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[playerId];
+    if (!activePrivate) {
+      activePrivate = await this.getPlayerPrivate(roomId, playerId);
+      if (activePrivate) local.privateStates[playerId] = activePrivate;
+    }
     if (!activePlayer || !activePrivate) return { success: false, error: 'Игрок не найден.' };
 
     const cardIndex = activePrivate.cards.findIndex(c => c.id === cardId);
@@ -799,7 +818,7 @@ class NetworkManager {
     this.advanceToExchange(local, roomId);
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, [playerId]);
     return { success: true };
   }
 
@@ -922,7 +941,7 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, [playerId]);
     return { success: true };
   }
 
@@ -942,35 +961,53 @@ class NetworkManager {
       return { success: false, error: 'Предложение обмена не адресовано вам.' };
     }
 
-    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
-    if (!targetPrivate) {
-      targetPrivate = await this.getPlayerPrivate(roomId, targetPlayerId);
-      if (targetPrivate) local.privateStates[targetPlayerId] = targetPrivate;
-    }
-    let sourcePrivate: PlayerPrivate | null | undefined = local.privateStates[offer.fromPlayerId];
-    if (!sourcePrivate) {
-      sourcePrivate = await this.getPlayerPrivate(roomId, offer.fromPlayerId);
-      if (sourcePrivate) local.privateStates[offer.fromPlayerId] = sourcePrivate;
-    }
+    // Всегда получаем свежие приватные состояния игроков (из базы или памяти)
+    const freshTargetPriv = await this.getPlayerPrivate(roomId, targetPlayerId);
+    if (freshTargetPriv) local.privateStates[targetPlayerId] = freshTargetPriv;
+    const freshSourcePriv = await this.getPlayerPrivate(roomId, offer.fromPlayerId);
+    if (freshSourcePriv) local.privateStates[offer.fromPlayerId] = freshSourcePriv;
+
+    const targetPrivate = local.privateStates[targetPlayerId];
+    const sourcePrivate = local.privateStates[offer.fromPlayerId];
     if (!targetPrivate || !sourcePrivate) return { success: false, error: 'Данные игроков не найдены.' };
 
-    const cardIndex = targetPrivate.cards.findIndex(c => c.id === cardId);
-    if (cardIndex === -1) return { success: false, error: 'Карта не найдена.' };
+    let cardIndex = targetPrivate.cards.findIndex(c => c.id === cardId);
+    if (cardIndex === -1) {
+      cardIndex = targetPrivate.cards.findIndex(c => c.code === cardId);
+    }
+    if (cardIndex === -1) return { success: false, error: 'Карта не найдена в руке.' };
     const targetCard = targetPrivate.cards[cardIndex];
 
     const validation = validateExchangeCard(targetCard, targetPrivate);
     if (!validation.valid) return { success: false, error: validation.error };
 
-    const sourceCardIndex = sourcePrivate.cards.findIndex(c => c.id === offer.card.id);
+    // Находим отдаваемую инициатором карту в руке инициатора
+    let sourceCardIndex = sourcePrivate.cards.findIndex(c => c.id === offer.card.id);
+    if (sourceCardIndex === -1) {
+      sourceCardIndex = sourcePrivate.cards.findIndex(c => c.code === offer.card.code);
+    }
+    let actualOfferedCard = offer.card;
     if (sourceCardIndex !== -1) {
-      sourcePrivate.cards.splice(sourceCardIndex, 1);
+      actualOfferedCard = sourcePrivate.cards.splice(sourceCardIndex, 1)[0];
+    } else if (sourcePrivate.cards.length > 0) {
+      // Защита от рассинхронизации: берем подходящую карту
+      const safeIdx = sourcePrivate.cards.findIndex(c => c.code !== 'THE_THING');
+      actualOfferedCard = sourcePrivate.cards.splice(safeIdx !== -1 ? safeIdx : 0, 1)[0];
     }
     targetPrivate.cards.splice(cardIndex, 1);
 
+    // Добавляем карты в руки
     sourcePrivate.cards.push(targetCard);
-    targetPrivate.cards.push(offer.card);
+    targetPrivate.cards.push(actualOfferedCard);
 
-    if (offer.card.code === 'INFECTION' && (sourcePrivate.role === 'THE_THING' || sourcePrivate.role === 'INFECTED')) {
+    // Строго синхронизируем handCount обоих участников
+    const sourcePlayer = state.players.find(p => p.id === offer.fromPlayerId);
+    const targetPlayer = state.players.find(p => p.id === targetPlayerId);
+    if (sourcePlayer) sourcePlayer.handCount = sourcePrivate.cards.length;
+    if (targetPlayer) targetPlayer.handCount = targetPrivate.cards.length;
+
+    // Механика заражения при обмене
+    if (actualOfferedCard.code === 'INFECTION' && (sourcePrivate.role === 'THE_THING' || sourcePrivate.role === 'INFECTED')) {
       if (targetPrivate.role === 'HUMAN') {
         targetPrivate.role = 'INFECTED';
         targetPrivate.infectedBy = offer.fromPlayerId;
@@ -982,9 +1019,6 @@ class NetworkManager {
         sourcePrivate.infectedBy = targetPlayerId;
       }
     }
-
-    const sourcePlayer = state.players.find(p => p.id === offer.fromPlayerId);
-    const targetPlayer = state.players.find(p => p.id === targetPlayerId);
 
     this.addLog(state, `🤝 ${sourcePlayer?.name} и ${targetPlayer?.name} тайно обменялись картами под столом.`, 'EXCHANGE');
 
@@ -1008,7 +1042,7 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, [offer.fromPlayerId, targetPlayerId]);
     return { success: true };
   }
 
@@ -1148,7 +1182,7 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, [defenderId, defense.sourcePlayerId]);
     return { success: true };
   }
 
@@ -1298,6 +1332,20 @@ class NetworkManager {
 
     if (nextIdx === 0) {
       state.roundNumber += 1;
+    }
+
+    // Строгий инвариант официальных правил (стр. 8): В начале и в конце хода на руке ровно 4 карты
+    for (const p of state.players) {
+      if (p.isDead) continue;
+      const priv = local.privateStates[p.id];
+      if (priv) {
+        while (priv.cards.length > 4) {
+          const excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'INFECTED'));
+          const toDiscard = excessIdx !== -1 ? priv.cards.splice(excessIdx, 1)[0] : priv.cards.pop()!;
+          state.discardPile.unshift(toDiscard);
+        }
+        p.handCount = priv.cards.length;
+      }
     }
 
     state.currentTurnPlayerId = nextPlayer.id;
@@ -1502,6 +1550,15 @@ class NetworkManager {
     return () => {
       ch.removeEventListener('message', listener);
     };
+  }
+
+  public async clearPanicEvent(roomId: string): Promise<void> {
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
+    if (!local) return;
+    local.publicState.panicEvent = null;
+    local.publicState.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local);
   }
 
   public getRoomSnapshot(roomId: string): RoomPublicState | null {

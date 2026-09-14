@@ -254,10 +254,47 @@ export const CardHand: React.FC<CardHandProps> = ({
     <div className="w-full flex flex-col items-center select-none pb-2 pt-1 px-3">
       
       {/* Секретный бейдж роли (виден только владельцу) */}
-      <div className="flex items-center gap-2 mb-2 px-3 py-1 rounded-full border shadow-lg backdrop-blur-md transition-all text-xs font-semibold ${roleBadge.style}">
+      <div className={`flex items-center gap-2 mb-2 px-3 py-1 rounded-full border shadow-lg backdrop-blur-md transition-all text-xs font-semibold ${roleBadge.style}`}>
         {roleBadge.icon}
         <span>{roleBadge.title}</span>
         <span className="text-[11px] opacity-75 hidden sm:inline">• {roleBadge.desc}</span>
+      </div>
+
+      {/* Подсказка текущего шага хода / статуса */}
+      <div className="w-full max-w-2xl mb-2 px-3 py-1.5 rounded-xl border border-white/10 bg-polar-900/90 text-center text-xs font-semibold backdrop-blur-md shadow-md transition-all">
+        {isCurrentTurn ? (
+          phase === 'ACTION' ? (
+            activePlayer.quarantineTurns > 0 ? (
+              <span className="text-amber-300">
+                ☣️ <strong>ВЫ В КАРАНТИНЕ:</strong> По правилам (стр. 13) играть действия нельзя. Выберите карту и нажмите <strong>«Сбросить»</strong> в закрытую.
+              </span>
+            ) : (
+              <span className="text-frost">
+                🎯 <strong>ВАШ ХОД (Шаг 2 из 3):</strong> Нажмите <strong>«Сыграть»</strong> на карте действия ИЛИ <strong>«Сбросить»</strong> карту в закрытую стопку сброса.
+              </span>
+            )
+          ) : phase === 'EXCHANGE_OFFER' ? (
+            <span className="text-amber-300">
+              🤝 <strong>ВАШ ХОД (Шаг 3 из 3 — Обмен):</strong> Выберите 1 карту из руки и нажмите <strong>«Передать»</strong> для тайного обмена со следующим полярником.
+            </span>
+          ) : (
+            <span className="text-slate-300">
+              ⏳ Ожидание ответа на обмен...
+            </span>
+          )
+        ) : isDefenseTarget ? (
+          <span className="text-red-300 animate-pulse">
+            🚨 <strong>ВАС АТАКУЮТ ИЛИ ПРЕДЛАГАЮТ ОБМЕН!</strong> Сыграйте карту защиты ниже или ответьте в окне защиты.
+          </span>
+        ) : isExchangeTarget ? (
+          <span className="text-emerald-300 animate-pulse">
+            🤝 <strong>ВАМ ПРЕДЛОЖИЛИ ТАЙНЫЙ ОБМЕН!</strong> Выберите карту и нажмите <strong>«Отдать в ответ»</strong>.
+          </span>
+        ) : (
+          <span className="text-slate-400">
+            👁️ Наблюдайте за действиями полярников. В начале и конце хода у каждого всегда ровно 4 карты.
+          </span>
+        )}
       </div>
 
       {/* Веер карт в руке */}
@@ -267,11 +304,29 @@ export const CardHand: React.FC<CardHandProps> = ({
           const isHovered = hoveredCardId === card.id;
 
           // Проверка доступных действий
-          const isPlayable = isCurrentTurn && phase === 'ACTION' && card.category !== 'THE_THING' && card.category !== 'INFECTION' && card.category !== 'DEFENSE';
-          const isDiscardable = isCurrentTurn && phase === 'ACTION' && card.code !== 'THE_THING';
+          const isPlayable = isCurrentTurn && phase === 'ACTION' && card.category !== 'THE_THING' && card.category !== 'INFECTION' && card.category !== 'DEFENSE' && activePlayer.quarantineTurns === 0;
+          const isDiscardable = isCurrentTurn && phase === 'ACTION' && card.code !== 'THE_THING' && !(card.code === 'INFECTION' && playerPrivate.role === 'INFECTED' && cards.filter(c => c.code === 'INFECTION').length <= 1);
           const isExchangeableOffer = isCurrentTurn && phase === 'EXCHANGE_OFFER' && card.code !== 'THE_THING' && (card.code !== 'INFECTION' || playerPrivate.role !== 'HUMAN');
           const isExchangeableResponse = isExchangeTarget && (phase === 'EXCHANGE_RESPOND' || phase === 'EXCHANGE_DEFENSE_WAIT') && card.code !== 'THE_THING' && (card.code !== 'INFECTION' || playerPrivate.role !== 'HUMAN');
           const isDefendable = isDefenseTarget && card.category === 'DEFENSE';
+          const hasAnyAction = isPlayable || isDiscardable || isExchangeableOffer || isExchangeableResponse || isDefendable;
+
+          let disabledReason = 'Недоступно в текущий момент';
+          if (card.code === 'THE_THING') {
+            disabledReason = 'Нечто нельзя сбросить или передать (стр. 8)';
+          } else if (activePlayer.quarantineTurns > 0 && card.category === 'ACTION') {
+            disabledReason = 'В карантине играть действия запрещено (стр. 13)';
+          } else if (card.category === 'DEFENSE' && isCurrentTurn) {
+            disabledReason = 'Защита играется только в чужой ход (стр. 12)';
+          } else if (card.code === 'INFECTION' && playerPrivate.role === 'HUMAN' && (phase === 'EXCHANGE_OFFER' || isExchangeTarget)) {
+            disabledReason = 'Человек не может передавать Заражение (стр. 7)';
+          } else if (card.code === 'INFECTION' && playerPrivate.role === 'INFECTED' && cards.filter(c => c.code === 'INFECTION').length <= 1) {
+            disabledReason = 'Заражённый обязан держать 1 Заражение (стр. 7)';
+          } else if (!isCurrentTurn && !isDefenseTarget && !isExchangeTarget) {
+            disabledReason = 'Действие недоступно в чужой ход';
+          } else if (isCurrentTurn && phase === 'EXCHANGE_OFFER') {
+            disabledReason = 'В фазе обмена можно только передать карту';
+          }
 
           return (
             <div
@@ -391,6 +446,12 @@ export const CardHand: React.FC<CardHandProps> = ({
                       >
                         Защититься!
                       </button>
+                    )}
+
+                    {!hasAnyAction && (
+                      <div className="py-1 px-1.5 rounded bg-black/70 border border-amber-500/30 text-[9px] text-amber-300 font-medium text-center leading-tight">
+                        {disabledReason}
+                      </div>
                     )}
 
                     <button

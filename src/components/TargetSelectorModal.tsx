@@ -49,65 +49,81 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
   const isSwitch = card.code === 'SWITCH_PLACES';
   const isGetOutOfHere = card.code === 'GET_OUT_OF_HERE';
 
-  // Фильтруем игроков строго по официальным правилам рассадки за столом
-  const candidatePlayers = livingPlayers.filter(p => {
-    // 1. «Сматывай удочки!»: любой живой игрок за столом, кроме себя, если он не в карантине (двери игнорируются)
-    if (isGetOutOfHere) {
-      return p.id !== currentUserId && p.quarantineTurns === 0;
-    }
+  // Вычисляем статус для каждого игрока с подробной причиной недоступности
+  const playersWithStatus = livingPlayers
+    .filter(p => {
+      // Себя показываем только для карт, которые можно играть на себя (Карантин, Топор)
+      if (p.id === currentUserId && !isQuarantine && !isAxe) return false;
+      return true;
+    })
+    .map(p => {
+      let eligible = true;
+      let reason = 'Доступен для выбора';
 
-    // 2. «Соблазн»: любой живой игрок за столом, кроме себя, если он не в карантине
-    if (isSeduction) {
-      return p.id !== currentUserId && p.quarantineTurns === 0;
-    }
-
-    // 3. «Карантин»: на себя или на смежного соседа (если еще не в карантине)
-    if (isQuarantine) {
-      if (p.quarantineTurns > 0) return false;
-      return p.id === currentUserId || p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-    }
-
-    // 4. Себя нельзя выбирать для других действий
-    if (p.id === currentUserId) return false;
-
-    // 5. «Заколоченная дверь»: только смежный сосед, с которым двери еще нет
-    if (isDoor) {
+      const isSelf = p.id === currentUserId;
       const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-      if (!isNeighbor) return false;
-      return !isDoorBetween(doors, currentUserId, p.id, players);
-    }
+      const doorBlocked = isDoorBetween(doors, currentUserId, p.id, players);
 
-    // 6. «Огнемёт»: только смежный сосед, не за дверью и не в карантине
-    if (isFlamethrower) {
-      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-      if (!isNeighbor) return false;
-      if (p.quarantineTurns > 0) return false;
-      return !isDoorBetween(doors, currentUserId, p.id, players);
-    }
+      if (isGetOutOfHere) {
+        if (isSelf) {
+          eligible = false;
+          reason = 'Нельзя на себя';
+        } else if (p.quarantineTurns > 0) {
+          eligible = false;
+          reason = 'В карантине (стр. 12)';
+        }
+      } else if (isSeduction) {
+        if (isSelf) {
+          eligible = false;
+          reason = 'Нельзя на себя';
+        } else if (p.quarantineTurns > 0) {
+          eligible = false;
+          reason = 'В карантине (стр. 12)';
+        }
+      } else if (isQuarantine) {
+        if (p.quarantineTurns > 0) {
+          eligible = false;
+          reason = 'Уже в карантине';
+        } else if (!isSelf && !isNeighbor) {
+          eligible = false;
+          reason = 'Не смежный сосед';
+        }
+      } else if (isDoor) {
+        if (isSelf) {
+          eligible = false;
+          reason = 'Нельзя на себя';
+        } else if (!isNeighbor) {
+          eligible = false;
+          reason = 'Не смежный сосед';
+        } else if (doorBlocked) {
+          eligible = false;
+          reason = 'Дверь уже установлена';
+        }
+      } else if (isFlamethrower || isSwitch || card.code === 'ANALYSIS' || card.code === 'SUSPICION') {
+        if (isSelf) {
+          eligible = false;
+          reason = 'Нельзя на себя';
+        } else if (!isNeighbor) {
+          eligible = false;
+          reason = 'Не смежный сосед';
+        } else if (doorBlocked) {
+          eligible = false;
+          reason = 'Заблокирован дверью';
+        } else if (p.quarantineTurns > 0) {
+          eligible = false;
+          reason = 'В карантине';
+        }
+      } else if (isAxe) {
+        if (p.quarantineTurns === 0) {
+          eligible = false;
+          reason = 'Не в карантине';
+        }
+      }
 
-    // 7. «Меняемся местами!»: только смежный сосед, не за дверью и не в карантине
-    if (isSwitch) {
-      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-      if (!isNeighbor) return false;
-      if (p.quarantineTurns > 0) return false;
-      return !isDoorBetween(doors, currentUserId, p.id, players);
-    }
+      return { player: p, eligible, reason };
+    });
 
-    // 8. «Анализ» и «Подозрение»: только смежный сосед, не за дверью и не в карантине
-    if (card.code === 'ANALYSIS' || card.code === 'SUSPICION') {
-      const isNeighbor = p.id === leftNeighbor?.id || p.id === rightNeighbor?.id;
-      if (!isNeighbor) return false;
-      if (p.quarantineTurns > 0) return false;
-      return !isDoorBetween(doors, currentUserId, p.id, players);
-    }
-
-    // 9. «Топор»: игрок в карантине (смежный или сам)
-    if (isAxe) {
-      return p.quarantineTurns > 0;
-    }
-
-    return true;
-  });
+  const availableCount = playersWithStatus.filter(item => item.eligible).length;
 
   return (
     <div 
@@ -176,37 +192,75 @@ export const TargetSelectorModal: React.FC<TargetSelectorModalProps> = ({
           </div>
         )}
 
-        {/* Вариант 2: Список подходящих игроков */}
+        {/* Вариант 2: Список игроков станции */}
         <div className="space-y-2">
-          <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
-            Доступные игроки:
+          <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
+            <span>Игроки экспедиции:</span>
+            <span className="text-[10px] text-frost lowercase font-mono">доступно целей: {availableCount}</span>
           </div>
 
-          {candidatePlayers.length > 0 ? (
-            <div className="grid grid-cols-2 gap-2.5">
-              {candidatePlayers.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => onSelectTargetPlayer(p.id)}
-                  className="flex items-center gap-3 p-3 rounded-xl bg-polar-950/80 border border-white/10 hover:border-frost hover:bg-polar-850 transition-all text-left group"
-                >
-                  <div className="p-2 rounded-lg bg-white/5 group-hover:text-frost text-slate-300">
-                    {getAvatarIcon(p.avatar, 'w-5 h-5')}
-                  </div>
-                  <div className="overflow-hidden">
-                    <div className="text-xs font-bold text-slate-200 group-hover:text-frost truncate">
-                      {p.name} {p.id === currentUserId && '(Вы)'}
+          {playersWithStatus.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {playersWithStatus.map(({ player: p, eligible, reason }) => {
+                if (eligible) {
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        soundFx.playCardDraw();
+                        onSelectTargetPlayer(p.id);
+                      }}
+                      className="flex items-center justify-between p-2.5 rounded-xl bg-polar-950/90 border border-frost/50 hover:border-cyan-400 hover:bg-polar-850 transition-all text-left group cursor-pointer shadow-md active:scale-98"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-white/5 group-hover:text-frost text-slate-300">
+                          {getAvatarIcon(p.avatar, 'w-5 h-5')}
+                        </div>
+                        <div className="overflow-hidden">
+                          <div className="text-xs font-bold text-slate-200 group-hover:text-frost truncate">
+                            {p.name} {p.id === currentUserId && '(Вы)'}
+                          </div>
+                          <div className="text-[10px] text-cyan-300 font-medium">
+                            {p.quarantineTurns > 0 ? `Карантин (${p.quarantineTurns})` : `${p.handCount} карт`}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-1 rounded bg-frost hover:bg-cyan-400 text-polar-950 uppercase shrink-0">
+                        Выбрать
+                      </span>
+                    </button>
+                  );
+                } else {
+                  return (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between p-2.5 rounded-xl bg-polar-950/40 border border-white/5 text-left opacity-60 cursor-not-allowed"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-white/5 text-slate-600">
+                          {getAvatarIcon(p.avatar, 'w-5 h-5')}
+                        </div>
+                        <div className="overflow-hidden">
+                          <div className="text-xs font-medium text-slate-400 truncate">
+                            {p.name} {p.id === currentUserId && '(Вы)'}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {p.handCount} карт
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-red-950/60 border border-red-500/20 text-red-300 text-right shrink-0 max-w-[120px] truncate" title={reason}>
+                        {reason}
+                      </span>
                     </div>
-                    <div className="text-[10px] text-slate-500">
-                      {p.quarantineTurns > 0 ? `Карантин (${p.quarantineTurns})` : `${p.handCount} карт`}
-                    </div>
-                  </div>
-                </button>
-              ))}
+                  );
+                }
+              })}
             </div>
           ) : (
             <div className="py-6 text-center text-xs text-slate-400 italic">
-              Нет доступных целей для применения этой карты прямо сейчас.
+              Нет подходящих игроков за столом.
             </div>
           )}
         </div>

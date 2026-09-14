@@ -136,6 +136,12 @@ export interface RoomPublicState {
     cards: GameCard[];
     title: string;
   } | null;
+  panicEvent?: {
+    card: GameCard;
+    playerId: string;
+    playerName: string;
+    timestamp: number;
+  } | null;
   finalRoles?: Record<string, Role>;
   lastUpdated: number;
 }

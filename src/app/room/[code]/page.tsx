@@ -17,6 +17,7 @@ import { CardHand } from '@/components/CardHand';
 import { DefenseModal } from '@/components/DefenseModal';
 import { TargetSelectorModal } from '@/components/TargetSelectorModal';
 import { RevealedCardsModal } from '@/components/RevealedCardsModal';
+import { PanicModal } from '@/components/PanicModal';
 import { GameOverModal } from '@/components/GameOverModal';
 import { ActionLog } from '@/components/ActionLog';
 import { RulebookModal } from '@/components/RulebookModal';
@@ -108,14 +109,16 @@ export default function RoomPage() {
     if (!roomState) return;
 
     if (roomState.status === 'PLAYING') {
-      if (roomState.currentTurnPlayerId === currentUserId) {
+      if (roomState.panicEvent) {
+        soundFx.playAlarm();
+      } else if (roomState.currentTurnPlayerId === currentUserId) {
         soundFx.playHeartbeat();
       }
       if (roomState.pendingDefense?.targetPlayerId === currentUserId) {
         soundFx.playAlarm();
       }
     }
-  }, [roomState?.currentTurnPlayerId, roomState?.pendingDefense, currentUserId]);
+  }, [roomState?.currentTurnPlayerId, roomState?.pendingDefense, roomState?.panicEvent, currentUserId]);
 
   // Быстрый вход, если перешли по прямой ссылке из Discord
   const handleDirectJoin = async (e: React.FormEvent) => {
@@ -471,6 +474,14 @@ export default function RoomPage() {
           title={roomState.revealedCards.title}
           cards={roomState.revealedCards.cards}
           onClose={handleCloseRevealedCards}
+        />
+      )}
+
+      {/* Модальное окно Карты Паники */}
+      {roomState.panicEvent && (
+        <PanicModal
+          panicEvent={roomState.panicEvent}
+          onClose={() => networkManager.clearPanicEvent(roomCode)}
         />
       )}
 

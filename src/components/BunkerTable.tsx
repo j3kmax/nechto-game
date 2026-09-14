@@ -121,22 +121,24 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
               <span className="text-[10px] text-slate-400 mt-1 font-mono">Колода</span>
             </div>
 
-            {/* Сброс */}
+            {/* Сброс (По официальным правилам: всегда в закрытую, лицевой стороной вниз!) */}
             <div className="flex flex-col items-center">
-              <div className="relative w-14 h-20 rounded-lg bg-polar-950 border border-white/10 shadow-lg flex flex-col items-center justify-center p-1 text-center">
-                {topDiscard ? (
+              <div className="relative w-14 h-20 rounded-lg bg-gradient-to-b from-slate-900 to-black border border-slate-700/50 shadow-lg flex flex-col items-center justify-center p-1 text-center group cursor-default" title="Стопка сброса (в закрытую, рубашкой вверх)">
+                {discardPile.length > 0 ? (
                   <>
-                    <div className="p-1 rounded bg-white/5 text-slate-300">
-                      {getCardVisual(topDiscard.code).icon}
+                    <div className="w-8 h-12 rounded border border-slate-700/40 bg-slate-950 flex items-center justify-center shadow-inner">
+                      <div className="w-5 h-8 rounded-sm bg-stripes-pattern border border-slate-800/80 flex items-center justify-center">
+                        <span className="text-[8px] font-black text-slate-500 font-mono">🔒</span>
+                      </div>
                     </div>
-                    <span className="text-[9px] font-bold text-slate-300 truncate max-w-full mt-0.5">
-                      {topDiscard.name}
+                    <span className="text-[8px] font-semibold text-slate-400 mt-1 uppercase tracking-wider">
+                      Закрыто
                     </span>
                   </>
                 ) : (
                   <span className="text-[9px] text-slate-600 italic">Пусто</span>
                 )}
-                <div className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full bg-slate-800 border border-white/10 text-slate-300 text-[10px] font-mono">
+                <div className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full bg-slate-800 border border-white/10 text-slate-300 text-[10px] font-mono shadow">
                   {discardPile.length}
                 </div>
               </div>
