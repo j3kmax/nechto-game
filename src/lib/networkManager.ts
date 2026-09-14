@@ -37,15 +37,22 @@ export function generateRoomCode(): string {
   return code;
 }
 
-// Локальное хранилище для режима без Firebase или оффлайн/демо
+// Очистка объекта от значений undefined перед отправкой в Firestore
+function cleanForFirestore<T>(data: T): T {
+  return JSON.parse(JSON.stringify(data, (key, value) => (value === undefined ? null : value)));
+}
+
+// Локальное и серверное хранилище комнаты
 interface LocalGameState {
   publicState: RoomPublicState;
   privateStates: Record<string, PlayerPrivate>;
+  fullDrawDeck?: GameCard[];
   offeredExchangeCard?: {
     fromPlayerId: string;
     targetPlayerId: string;
     card: GameCard;
   };
+  forcedExchangeTargetId?: string;
 }
 
 class NetworkManager {
@@ -54,7 +61,6 @@ class NetworkManager {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Восстанавливаем из localStorage при перезагрузке
       try {
         const saved = localStorage.getItem('nechto_local_rooms');
         if (saved) {
@@ -69,21 +75,87 @@ class NetworkManager {
     }
   }
 
-  private saveLocalRoom(roomId: string, state: LocalGameState) {
+  // Централизованное сохранение и синхронизация (LocalStorage + BroadcastChannel + Firestore)
+  private async saveAndSync(roomId: string, state: LocalGameState) {
+    roomId = roomId.toUpperCase().trim();
     this.localRooms.set(roomId, state);
+
     if (typeof window !== 'undefined') {
       try {
         const obj: Record<string, LocalGameState> = {};
         this.localRooms.forEach((v, k) => { obj[k] = v; });
         localStorage.setItem('nechto_local_rooms', JSON.stringify(obj));
         
-        // Оповещаем другие вкладки через BroadcastChannel
         const ch = this.getChannel(roomId);
         ch.postMessage({ type: 'SYNC', roomId });
       } catch (e) {
         console.error('Ошибка сохранения локальной комнаты:', e);
       }
     }
+
+    // СИНХРОНИЗАЦИЯ С ОБЛАЧНЫМ FIREBASE FIRESTORE
+    if (isFirebaseConfigured && db) {
+      try {
+        const promises: Promise<unknown>[] = [];
+
+        // 1. Публичное состояние стола
+        const cleanPublic = cleanForFirestore(state.publicState);
+        promises.push(setDoc(doc(db, 'rooms', roomId, 'public', 'state'), cleanPublic));
+
+        // 2. Секретные карты каждого игрока
+        for (const pId in state.privateStates) {
+          if (state.privateStates[pId]) {
+            const cleanPriv = cleanForFirestore(state.privateStates[pId]);
+            promises.push(setDoc(doc(db, 'rooms', roomId, 'private', pId), cleanPriv));
+          }
+        }
+
+        // 3. Метаданные колоды и обмена
+        const meta = {
+          fullDrawDeck: state.fullDrawDeck || [],
+          offeredExchangeCard: state.offeredExchangeCard || null,
+          forcedExchangeTargetId: state.forcedExchangeTargetId || null,
+        };
+        promises.push(setDoc(doc(db, 'rooms', roomId, 'private', '_game_meta'), cleanForFirestore(meta)));
+
+        await Promise.all(promises);
+      } catch (err) {
+        console.error('[Firebase] Ошибка синхронизации с Firestore:', err);
+      }
+    }
+  }
+
+  // Убедиться, что актуальное состояние загружено (из Firestore или памяти)
+  private async ensureRoomState(roomId: string): Promise<LocalGameState | null> {
+    roomId = roomId.toUpperCase().trim();
+    let local = this.localRooms.get(roomId);
+
+    if (isFirebaseConfigured && db) {
+      try {
+        const snap = await getDoc(doc(db, 'rooms', roomId, 'public', 'state'));
+        if (snap.exists()) {
+          const remotePublic = snap.data() as RoomPublicState;
+          if (!local) {
+            local = { publicState: remotePublic, privateStates: {} };
+            this.localRooms.set(roomId, local);
+          } else {
+            local.publicState = remotePublic;
+          }
+        }
+
+        const metaSnap = await getDoc(doc(db, 'rooms', roomId, 'private', '_game_meta'));
+        if (metaSnap.exists() && local) {
+          const meta = metaSnap.data();
+          if (meta.fullDrawDeck) local.fullDrawDeck = meta.fullDrawDeck;
+          if (meta.offeredExchangeCard) local.offeredExchangeCard = meta.offeredExchangeCard;
+          if (meta.forcedExchangeTargetId) local.forcedExchangeTargetId = meta.forcedExchangeTargetId;
+        }
+      } catch (err) {
+        console.warn('[Firebase] ensureRoomState error:', err);
+      }
+    }
+
+    return local || null;
   }
 
   private getChannel(roomId: string): BroadcastChannel {
@@ -165,21 +237,12 @@ class NetworkManager {
       cards: [],
     };
 
-    if (isFirebaseConfigured && db) {
-      try {
-        await setDoc(doc(db, 'rooms', roomId, 'public', 'state'), publicState);
-        await setDoc(doc(db, 'rooms', roomId, 'private', playerId), privateState);
-      } catch (err) {
-        console.warn('Firebase error, falling back to local engine:', err);
-      }
-    }
-
-    // Сохраняем локально
-    this.saveLocalRoom(roomId, {
+    const localState: LocalGameState = {
       publicState,
       privateStates: { [playerId]: privateState },
-    });
+    };
 
+    await this.saveAndSync(roomId, localState);
     return { roomId, playerId };
   }
 
@@ -190,24 +253,7 @@ class NetworkManager {
     playerAvatar: AvatarId
   ): Promise<{ success: boolean; playerId: string; error?: string }> {
     roomId = roomId.toUpperCase().trim();
-    let local = this.localRooms.get(roomId);
-
-    if (isFirebaseConfigured && db) {
-      try {
-        const snap = await getDoc(doc(db, 'rooms', roomId, 'public', 'state'));
-        if (snap.exists()) {
-          const remotePublic = snap.data() as RoomPublicState;
-          if (!local) {
-            local = { publicState: remotePublic, privateStates: {} };
-            this.localRooms.set(roomId, local);
-          } else {
-            local.publicState = remotePublic;
-          }
-        }
-      } catch (e) {
-        console.warn('Firebase join error:', e);
-      }
-    }
+    const local = await this.ensureRoomState(roomId);
 
     if (!local) {
       return { success: false, playerId: '', error: 'Комната с таким кодом не найдена.' };
@@ -238,32 +284,19 @@ class NetworkManager {
     this.addLog(local.publicState, `${newPlayer.name} вошел в полярный отсек.`);
     local.publicState.lastUpdated = Date.now();
 
-    const privateState: PlayerPrivate = {
+    local.privateStates[playerId] = {
       role: 'HUMAN',
       cards: [],
     };
-    local.privateStates[playerId] = privateState;
 
-    if (isFirebaseConfigured && db) {
-      try {
-        await updateDoc(doc(db, 'rooms', roomId, 'public', 'state'), {
-          players: local.publicState.players,
-          logs: local.publicState.logs,
-          lastUpdated: Date.now(),
-        });
-        await setDoc(doc(db, 'rooms', roomId, 'private', playerId), privateState);
-      } catch (err) {
-        console.warn('Firebase join write error:', err);
-      }
-    }
-
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true, playerId };
   }
 
-  // 3. Добавление бота для быстрого тестирования
+  // 3. Добавление бота
   public async addBot(roomId: string): Promise<boolean> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local || local.publicState.status !== 'LOBBY') return false;
     if (local.publicState.players.length >= 12) return false;
 
@@ -297,13 +330,14 @@ class NetworkManager {
       cards: [],
     };
 
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return true;
   }
 
   // 4. Исключение игрока (Кик)
   public async kickPlayer(roomId: string, hostPlayerId: string, targetPlayerId: string): Promise<boolean> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local || local.publicState.hostId !== hostPlayerId) return false;
 
     const targetIdx = local.publicState.players.findIndex(p => p.id === targetPlayerId);
@@ -312,20 +346,20 @@ class NetworkManager {
     const targetName = local.publicState.players[targetIdx].name;
     local.publicState.players.splice(targetIdx, 1);
     
-    // Пересчитываем места
     local.publicState.players.forEach((p, idx) => { p.seatIndex = idx; });
     delete local.privateStates[targetPlayerId];
 
     this.addLog(local.publicState, `Игрок ${targetName} был исключен из комнаты.`, 'WARNING');
     local.publicState.lastUpdated = Date.now();
 
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return true;
   }
 
   // 5. Передача прав хоста
   public async transferHost(roomId: string, currentHostId: string, newHostId: string): Promise<boolean> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local || local.publicState.hostId !== currentHostId) return false;
 
     const newHost = local.publicState.players.find(p => p.id === newHostId);
@@ -339,19 +373,20 @@ class NetworkManager {
     this.addLog(local.publicState, `Права командира станции переданы: ${newHost.name}.`);
     local.publicState.lastUpdated = Date.now();
 
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return true;
   }
 
   // 6. СТАРТ ИГРЫ
   public async startGame(roomId: string, hostPlayerId: string): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
     if (local.publicState.hostId !== hostPlayerId) return { success: false, error: 'Только командир (хост) может начать игру.' };
     if (local.publicState.players.length < 4) return { success: false, error: 'Для игры требуется минимум 4 полярника (можно добавить ботов).' };
 
     const playerIds = local.publicState.players.map(p => p.id);
-    const { playerHands, drawDeck, theThingPlayerId } = setupGameDeck(playerIds);
+    const { playerHands, drawDeck } = setupGameDeck(playerIds);
 
     // Применяем розданные карты и роли
     local.privateStates = playerHands;
@@ -370,12 +405,11 @@ class NetworkManager {
       p.quarantineTurns = 0;
     });
 
-    // Начинает случайный игрок или первый в очереди
+    // Начинает случайный игрок
     const startPlayerIndex = Math.floor(Math.random() * local.publicState.players.length);
     local.publicState.currentTurnPlayerId = local.publicState.players[startPlayerIndex].id;
 
-    // Сохраняем колоду добора в скрытом поле локального состояния
-    (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck = drawDeck;
+    local.fullDrawDeck = drawDeck;
 
     const startPlayer = local.publicState.players[startPlayerIndex];
     this.addLog(local.publicState, `ВНИМАНИЕ! Экспедиция изолирована. Среди вас бродит НЕЧТО!`, 'WARNING');
@@ -385,7 +419,7 @@ class NetworkManager {
     this.executeDrawPhase(local, roomId);
 
     local.publicState.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
@@ -393,23 +427,21 @@ class NetworkManager {
   private executeDrawPhase(local: LocalGameState, roomId: string) {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
-    const fullDeck = (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck;
+    const fullDeck = local.fullDrawDeck;
 
     if (!fullDeck || fullDeck.length === 0) {
-      // Перемешиваем сброс, если колода опустела
       if (state.discardPile.length > 0) {
-        (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
+        local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
         state.discardPile = [];
         this.addLog(state, `Колода опустела. Стопка сброса перетасована.`);
       } else {
-        // Колода совсем пуста
         state.phase = 'ACTION';
         return;
       }
     }
 
-    const drawnCard = (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck.shift()!;
-    state.deckCount = (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck.length;
+    const drawnCard = local.fullDrawDeck!.shift()!;
+    state.deckCount = local.fullDrawDeck!.length;
 
     const activePlayer = state.players.find(p => p.id === currentId);
     const activePrivate = local.privateStates[currentId];
@@ -428,7 +460,6 @@ class NetworkManager {
         this.addLog(state, `Слепое доверие заставляет всех быть настороже.`, 'PANIC');
       }
 
-      // После паники игрок добирает обычную карту
       this.executeDrawPhase(local, roomId);
       return;
     }
@@ -439,7 +470,6 @@ class NetworkManager {
     state.phase = 'ACTION';
     state.lastUpdated = Date.now();
 
-    // Если это бот — запускаем его логику
     if (activePlayer.isBot) {
       setTimeout(() => this.runBotTurn(roomId), 1200);
     }
@@ -453,7 +483,8 @@ class NetworkManager {
     targetPlayerId?: string, 
     selectedDoorIndex?: number
   ): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
 
     const state = local.publicState;
@@ -475,18 +506,15 @@ class NetworkManager {
       return { success: false, error: validation.error };
     }
 
-    // Удаляем сыгранную карту из руки
     activePrivate.cards.splice(cardIndex, 1);
     activePlayer.handCount = activePrivate.cards.length;
     state.discardPile.unshift(card);
 
-    // ОБРАБОТКА ЭФФЕКТОВ КАРТ
     switch (card.code) {
       case 'FLAMETHROWER': {
         if (!targetPlayer) break;
         this.addLog(state, `🔥 ${activePlayer.name} направляет ОГНЕМЁТ на ${targetPlayer.name}!`, 'ATTACK');
         
-        // Открываем окно защиты (15 секунд)
         state.pendingDefense = {
           sourcePlayerId: playerId,
           targetPlayerId: targetPlayer.id,
@@ -497,7 +525,6 @@ class NetworkManager {
         };
         state.phase = 'DEFENSE_WAIT';
         
-        // Авто-пропуск, если цель бот
         if (targetPlayer.isBot) {
           setTimeout(() => this.runBotDefense(roomId), 1500);
         }
@@ -506,7 +533,7 @@ class NetworkManager {
 
       case 'AXE': {
         if (selectedDoorIndex !== undefined && selectedDoorIndex >= 0 && state.doors[selectedDoorIndex]) {
-          const removedDoor = state.doors.splice(selectedDoorIndex, 1)[0];
+          state.doors.splice(selectedDoorIndex, 1);
           this.addLog(state, `🪓 ${activePlayer.name} срубил заколоченную дверь топором!`, 'INFO');
         } else if (targetPlayer && targetPlayer.quarantineTurns > 0) {
           targetPlayer.quarantineTurns = 0;
@@ -539,7 +566,7 @@ class NetworkManager {
           const targetCards = local.privateStates[targetPlayer.id]?.cards || [];
           state.revealedCards = {
             fromPlayerId: targetPlayer.id,
-            targetPlayerId: playerId, // видно только игроку
+            targetPlayerId: playerId,
             cards: targetCards,
             title: `Анализ крови: карты игрока ${targetPlayer.name}`,
           };
@@ -592,20 +619,19 @@ class NetworkManager {
       case 'SEDUCTION': {
         if (targetPlayer) {
           this.addLog(state, `🤝 ${activePlayer.name} применил «Соблазн» к ${targetPlayer.name}, требуя внеочередного обмена!`, 'EXCHANGE');
-          // Назначаем обмен именно с этой целью
           state.phase = 'EXCHANGE_OFFER';
-          (local as unknown as { forcedExchangeTargetId?: string }).forcedExchangeTargetId = targetPlayer.id;
+          local.forcedExchangeTargetId = targetPlayer.id;
         }
         break;
       }
 
       case 'PERSEVERANCE': {
-        const fullDeck = (local as unknown as { fullDrawDeck: GameCard[] }).fullDrawDeck;
+        const fullDeck = local.fullDrawDeck;
         if (fullDeck && fullDeck.length >= 3) {
           const extraCards = fullDeck.splice(0, 3);
           state.deckCount = fullDeck.length;
-          activePrivate.cards.push(extraCards[0]); // Добавляем лучшую
-          state.discardPile.unshift(extraCards[1], extraCards[2]); // Две сбрасываем
+          activePrivate.cards.push(extraCards[0]);
+          state.discardPile.unshift(extraCards[1], extraCards[2]);
           activePlayer.handCount = activePrivate.cards.length;
           this.addLog(state, `📦 ${activePlayer.name} проявил упорство и перерыл ящики снабжения.`, 'INFO');
         }
@@ -619,13 +645,14 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
-  // 8. Сброс карты (вместо розыгрыша действия)
+  // 8. Сброс карты
   public async discardCard(roomId: string, playerId: string, cardId: string): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
 
     const state = local.publicState;
@@ -654,30 +681,29 @@ class NetworkManager {
     this.advanceToExchange(local, roomId);
 
     state.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
-  // Переход к фазе обмена (Exchange Phase)
+  // Переход к фазе обмена
   private advanceToExchange(local: LocalGameState, roomId: string) {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
     const activePlayer = state.players.find(p => p.id === currentId);
 
-    // Если игрок в карантине — он не меняется картами, ход сразу завершается
     if (activePlayer && activePlayer.quarantineTurns > 0) {
       this.addLog(state, `${activePlayer.name} находится в карантине и пропускает обмен картами.`);
       this.endTurn(local, roomId);
       return;
     }
 
-    const forcedTargetId = (local as unknown as { forcedExchangeTargetId?: string }).forcedExchangeTargetId;
+    const forcedTargetId = local.forcedExchangeTargetId;
     let targetNeighbor: PlayerPublic | null = null;
     let isBlocked = false;
 
     if (forcedTargetId) {
       targetNeighbor = state.players.find(p => p.id === forcedTargetId) || null;
-      delete (local as unknown as { forcedExchangeTargetId?: string }).forcedExchangeTargetId;
+      delete local.forcedExchangeTargetId;
     } else {
       const neighbors = getPlayerNeighbors(state.players, currentId, state.direction, state.doors);
       targetNeighbor = neighbors.targetNeighbor;
@@ -704,15 +730,15 @@ class NetworkManager {
     state.phase = 'EXCHANGE_OFFER';
     this.addLog(state, `Фаза обмена: ${activePlayer?.name} должен выбрать карту для передачи ${targetNeighbor.name}.`, 'EXCHANGE');
 
-    // Если активный игрок бот — бот делает предложение
     if (activePlayer?.isBot) {
       setTimeout(() => this.runBotExchangeOffer(roomId), 1200);
     }
   }
 
-  // 9. Предложение карты для обмена (активный игрок)
+  // 9. Предложение карты для обмена
   public async offerExchangeCard(roomId: string, playerId: string, cardId: string): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
 
     const state = local.publicState;
@@ -737,7 +763,6 @@ class NetworkManager {
       card,
     };
 
-    // Проверяем, есть ли у соседа карты защиты («Нет, спасибо!» или «Страх»)
     const targetPrivate = local.privateStates[targetNeighbor.id];
     const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR');
 
@@ -767,13 +792,14 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
-  // 10. Ответ на обмен (сосед передает свою карту)
+  // 10. Ответ на обмен
   public async respondExchange(roomId: string, targetPlayerId: string, cardId: string): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
 
     const state = local.publicState;
@@ -797,29 +823,21 @@ class NetworkManager {
     const validation = validateExchangeCard(targetCard, targetPrivate);
     if (!validation.valid) return { success: false, error: validation.error };
 
-    // СОВЕРШАЕМ ОДНОВРЕМЕННЫЙ ОБМЕН КАРТАМИ
-    // 1. Изымаем карту отправителя
     const sourceCardIndex = sourcePrivate.cards.findIndex(c => c.id === offer.card.id);
     if (sourceCardIndex !== -1) {
       sourcePrivate.cards.splice(sourceCardIndex, 1);
     }
-    // 2. Изымаем карту получателя
     targetPrivate.cards.splice(cardIndex, 1);
 
-    // 3. Добавляем обменянные карты
     sourcePrivate.cards.push(targetCard);
     targetPrivate.cards.push(offer.card);
 
-    // 4. МЕХАНИКА ЗАРАЖЕНИЯ:
-    // Если активный игрок (Нечто или Зараженный) передал Заражение:
     if (offer.card.code === 'INFECTION' && (sourcePrivate.role === 'THE_THING' || sourcePrivate.role === 'INFECTED')) {
       if (targetPrivate.role === 'HUMAN') {
         targetPrivate.role = 'INFECTED';
         targetPrivate.infectedBy = offer.fromPlayerId;
-        // Заражение происходит абсолютно тайно! Никаких публичных логов о заражении!
       }
     }
-    // Если сосед передал Заражение активному игроку (в случае зараженного соседа):
     if (targetCard.code === 'INFECTION' && (targetPrivate.role === 'THE_THING' || targetPrivate.role === 'INFECTED')) {
       if (sourcePrivate.role === 'HUMAN') {
         sourcePrivate.role = 'INFECTED';
@@ -835,7 +853,6 @@ class NetworkManager {
     local.offeredExchangeCard = undefined;
     state.pendingDefense = null;
 
-    // Проверяем условия победы
     const winCheck = evaluateWinConditions(state.players, local.privateStates);
     if (winCheck.gameOver) {
       state.status = 'GAME_OVER';
@@ -847,13 +864,14 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
-  // 11. Защита (ответ на нападение или отмена обмена)
+  // 11. Защита
   public async respondDefense(roomId: string, defenderId: string, defenseCardId: string | null): Promise<{ success: boolean; error?: string }> {
-    const local = this.localRooms.get(roomId);
+    roomId = roomId.toUpperCase().trim();
+    const local = await this.ensureRoomState(roomId);
     if (!local) return { success: false, error: 'Комната не найдена.' };
 
     const state = local.publicState;
@@ -866,7 +884,6 @@ class NetworkManager {
     const defenderPlayer = state.players.find(p => p.id === defenderId);
     if (!defenderPlayer || !defenderPrivate) return { success: false, error: 'Игрок не найден.' };
 
-    // Если сыграна карта защиты
     if (defenseCardId) {
       const cardIdx = defenderPrivate.cards.findIndex(c => c.id === defenseCardId);
       if (cardIdx === -1) return { success: false, error: 'Карта защиты отсутствует.' };
@@ -876,7 +893,6 @@ class NetworkManager {
         return { success: false, error: 'Эта карта не подходит для защиты от данного эффекта.' };
       }
 
-      // Сбрасываем карту защиты
       defenderPrivate.cards.splice(cardIdx, 1);
       defenderPlayer.handCount = defenderPrivate.cards.length;
       state.discardPile.unshift(card);
@@ -905,25 +921,20 @@ class NetworkManager {
         this.endTurn(local, roomId);
       }
     } else {
-      // Игрок не защитился (пропустил или время вышло)
       if (defense.actionType === 'ATTACK' && defense.actionCard.code === 'FLAMETHROWER') {
-        // ИГРОК ПОГИБАЕТ!
         defenderPlayer.isDead = true;
         this.addLog(state, `💀 ${defenderPlayer.name} сгорел в пламени огнемёта и выбывает из игры!`, 'DEATH');
 
-        // Сбрасываем все его карты
         state.discardPile.push(...defenderPrivate.cards);
         defenderPrivate.cards = [];
         defenderPlayer.handCount = 0;
 
-        // Если это было Нечто:
         if (defenderPrivate.role === 'THE_THING') {
           this.addLog(state, `💥 ИСПЫТАНИЕ ЗАВЕРШЕНО! ${defenderPlayer.name} был НЕЧТО!`, 'WARNING');
         }
 
         state.pendingDefense = null;
 
-        // Проверка условий победы
         const winCheck = evaluateWinConditions(state.players, local.privateStates);
         if (winCheck.gameOver) {
           state.status = 'GAME_OVER';
@@ -934,7 +945,6 @@ class NetworkManager {
           this.endTurn(local, roomId);
         }
       } else if (defense.actionType === 'EXCHANGE') {
-        // Игрок не стал защищаться от обмена -> переходим к выбору ответной карты
         state.phase = 'EXCHANGE_RESPOND';
         state.pendingDefense = null;
         this.addLog(state, `${defenderPlayer.name} соглашается на обмен и выбирает карту.`, 'EXCHANGE');
@@ -946,23 +956,21 @@ class NetworkManager {
     }
 
     state.lastUpdated = Date.now();
-    this.saveLocalRoom(roomId, local);
+    await this.saveAndSync(roomId, local);
     return { success: true };
   }
 
-  // 12. Завершение хода и передача следующему игроку
+  // 12. Завершение хода
   private endTurn(local: LocalGameState, roomId: string) {
     const state = local.publicState;
     const living = getLivingPlayers(state.players);
 
     if (living.length === 0) return;
 
-    // Уменьшаем счетчик карантина у всех игроков в конце раунда
     const currentIdx = living.findIndex(p => p.id === state.currentTurnPlayerId);
     const nextIdx = (currentIdx + (state.direction === 1 ? 1 : -1) + living.length) % living.length;
     const nextPlayer = living[nextIdx];
 
-    // Если обошли стол — увеличиваем номер раунда и снижаем карантины
     if (nextIdx === 0) {
       state.roundNumber += 1;
       state.players.forEach(p => {
@@ -982,7 +990,7 @@ class NetworkManager {
     this.executeDrawPhase(local, roomId);
   }
 
-  // Автоматическая логика ботов (AI Bots)
+  // Боты
   private runBotTurn(roomId: string) {
     const local = this.localRooms.get(roomId);
     if (!local || local.publicState.status !== 'PLAYING') return;
@@ -994,15 +1002,12 @@ class NetworkManager {
     const botPrivate = local.privateStates[currentId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
-    // Бот решает: сыграть действие или сбросить
-    // Ищет безопасную карту для сброса или полезную для розыгрыша
     const nonCriticalCards = botPrivate.cards.filter(c => c.code !== 'THE_THING');
     const actionCard = nonCriticalCards.find(c => c.category === 'ACTION' || c.category === 'OBSTACLE');
 
     if (actionCard && actionCard.code === 'WHISKEY') {
       this.playCard(roomId, currentId, actionCard.id);
     } else {
-      // Сбрасывает любую ненужную карту
       const discardCandidate = nonCriticalCards.find(c => c.code !== 'INFECTION' || botPrivate.role !== 'INFECTED') || nonCriticalCards[0];
       if (discardCandidate) {
         this.discardCard(roomId, currentId, discardCandidate.id);
@@ -1042,10 +1047,8 @@ class NetworkManager {
     const botPrivate = local.privateStates[currentId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
-    // Нечто пытается передать Заражение
     let cardToOffer = botPrivate.cards.find(c => c.code === 'INFECTION');
     if (!cardToOffer || botPrivate.role === 'HUMAN') {
-      // Человек не может передавать заражение, берет обычную карту
       cardToOffer = botPrivate.cards.find(c => c.code !== 'THE_THING' && c.code !== 'INFECTION') || botPrivate.cards[0];
     }
 
@@ -1068,7 +1071,6 @@ class NetworkManager {
     const botPrivate = local.privateStates[targetId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
-    // Выбирает безопасную карту
     let cardToGive = botPrivate.cards.find(c => c.code !== 'THE_THING' && c.code !== 'INFECTION');
     if (!cardToGive) {
       cardToGive = botPrivate.cards[0];
@@ -1087,18 +1089,41 @@ class NetworkManager {
       try {
         const unsub = onSnapshot(doc(db, 'rooms', roomId, 'public', 'state'), snap => {
           if (snap.exists()) {
-            callback(snap.data() as RoomPublicState);
+            const remotePublic = snap.data() as RoomPublicState;
+            let local = this.localRooms.get(roomId);
+            if (!local) {
+              local = { publicState: remotePublic, privateStates: {} };
+              this.localRooms.set(roomId, local);
+            } else {
+              local.publicState = remotePublic;
+            }
+            callback(remotePublic);
           } else {
             callback(this.localRooms.get(roomId)?.publicState || null);
           }
         });
-        return unsub;
+
+        const unsubMeta = onSnapshot(doc(db, 'rooms', roomId, 'private', '_game_meta'), snap => {
+          if (snap.exists()) {
+            const meta = snap.data();
+            const local = this.localRooms.get(roomId);
+            if (local) {
+              if (meta.fullDrawDeck) local.fullDrawDeck = meta.fullDrawDeck;
+              if (meta.offeredExchangeCard) local.offeredExchangeCard = meta.offeredExchangeCard;
+              if (meta.forcedExchangeTargetId) local.forcedExchangeTargetId = meta.forcedExchangeTargetId;
+            }
+          }
+        });
+
+        return () => {
+          unsub();
+          unsubMeta();
+        };
       } catch (err) {
         console.warn('Firebase subscribe error:', err);
       }
     }
 
-    // Локальная подписка через BroadcastChannel и таймер
     const sync = () => {
       const room = this.localRooms.get(roomId);
       callback(room ? { ...room.publicState } : null);
@@ -1126,7 +1151,12 @@ class NetworkManager {
       try {
         const unsub = onSnapshot(doc(db, 'rooms', roomId, 'private', playerId), snap => {
           if (snap.exists()) {
-            callback(snap.data() as PlayerPrivate);
+            const priv = snap.data() as PlayerPrivate;
+            const local = this.localRooms.get(roomId);
+            if (local) {
+              local.privateStates[playerId] = priv;
+            }
+            callback(priv);
           } else {
             const priv = this.localRooms.get(roomId)?.privateStates[playerId];
             callback(priv || null);
@@ -1138,7 +1168,6 @@ class NetworkManager {
       }
     }
 
-    // Локальная подписка
     const sync = () => {
       const priv = this.localRooms.get(roomId)?.privateStates[playerId];
       callback(priv ? { ...priv } : null);
@@ -1158,7 +1187,6 @@ class NetworkManager {
     };
   }
 
-  // Получить текущее состояние комнаты мгновенно
   public getRoomSnapshot(roomId: string): RoomPublicState | null {
     return this.localRooms.get(roomId.toUpperCase().trim())?.publicState || null;
   }

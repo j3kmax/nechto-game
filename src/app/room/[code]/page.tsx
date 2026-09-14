@@ -143,10 +143,15 @@ export default function RoomPage() {
 
   // ДЕЙСТВИЯ ХОСТА
   const handleStartGame = async () => {
-    soundFx.playCardDraw();
-    const res = await networkManager.startGame(roomCode, currentUserId);
-    if (!res.success) {
-      alert(res.error);
+    try {
+      soundFx.playCardDraw();
+      const res = await networkManager.startGame(roomCode, currentUserId);
+      if (!res.success) {
+        alert(res.error || 'Ошибка старта игры.');
+      }
+    } catch (e: unknown) {
+      console.error('Ошибка старта игры:', e);
+      alert('Ошибка старта игры: ' + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -164,19 +169,17 @@ export default function RoomPage() {
   };
 
   // ИГРОВЫЕ ДЕЙСТВИЯ (ACTION PHASE)
-  const handlePlayCardClick = (card: GameCard) => {
-    // Если карта требует цели:
+  const handlePlayCardClick = async (card: GameCard) => {
     const targetedCodes = ['FLAMETHROWER', 'AXE', 'ANALYSIS', 'SUSPICION', 'BARRED_DOOR', 'QUARANTINE', 'SWITCH_PLACES', 'SEDUCTION'];
     if (targetedCodes.includes(card.code)) {
       setTargetCardToPlay(card);
     } else {
-      // Карты без выбора цели (Виски, Упорство)
-      networkManager.playCard(roomCode, currentUserId, card.id);
       soundFx.playCardDraw();
+      await networkManager.playCard(roomCode, currentUserId, card.id);
     }
   };
 
-  const handleConfirmTargetPlayer = (targetPlayerId: string) => {
+  const handleConfirmTargetPlayer = async (targetPlayerId: string) => {
     if (!targetCardToPlay) return;
     if (targetCardToPlay.code === 'FLAMETHROWER') {
       soundFx.playFlamethrower();
@@ -185,41 +188,41 @@ export default function RoomPage() {
     } else {
       soundFx.playCardDraw();
     }
-    networkManager.playCard(roomCode, currentUserId, targetCardToPlay.id, targetPlayerId);
+    await networkManager.playCard(roomCode, currentUserId, targetCardToPlay.id, targetPlayerId);
     setTargetCardToPlay(null);
   };
 
-  const handleConfirmDoorIndex = (doorIndex: number) => {
+  const handleConfirmDoorIndex = async (doorIndex: number) => {
     if (!targetCardToPlay) return;
     soundFx.playBarricade();
-    networkManager.playCard(roomCode, currentUserId, targetCardToPlay.id, undefined, doorIndex);
+    await networkManager.playCard(roomCode, currentUserId, targetCardToPlay.id, undefined, doorIndex);
     setTargetCardToPlay(null);
   };
 
-  const handleDiscardCard = (card: GameCard) => {
+  const handleDiscardCard = async (card: GameCard) => {
     soundFx.playCardDraw();
-    networkManager.discardCard(roomCode, currentUserId, card.id);
+    await networkManager.discardCard(roomCode, currentUserId, card.id);
   };
 
   // ОБМЕН КАРТАМИ (EXCHANGE PHASE)
-  const handleOfferExchangeCard = (card: GameCard) => {
+  const handleOfferExchangeCard = async (card: GameCard) => {
     soundFx.playCardDraw();
-    networkManager.offerExchangeCard(roomCode, currentUserId, card.id);
+    await networkManager.offerExchangeCard(roomCode, currentUserId, card.id);
   };
 
-  const handleRespondExchangeCard = (card: GameCard) => {
+  const handleRespondExchangeCard = async (card: GameCard) => {
     soundFx.playCardDraw();
-    networkManager.respondExchange(roomCode, currentUserId, card.id);
+    await networkManager.respondExchange(roomCode, currentUserId, card.id);
   };
 
   // ЗАЩИТА (DEFENSE)
-  const handlePlayDefense = (card: GameCard) => {
+  const handlePlayDefense = async (card: GameCard) => {
     soundFx.playDefenseSuccess();
-    networkManager.respondDefense(roomCode, currentUserId, card.id);
+    await networkManager.respondDefense(roomCode, currentUserId, card.id);
   };
 
-  const handlePassDefense = () => {
-    networkManager.respondDefense(roomCode, currentUserId, null);
+  const handlePassDefense = async () => {
+    await networkManager.respondDefense(roomCode, currentUserId, null);
   };
 
   // Загрузка или проверка существования комнаты
