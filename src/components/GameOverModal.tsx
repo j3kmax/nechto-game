@@ -3,8 +3,9 @@
 import React, { useEffect } from 'react';
 import { GameWinner, PlayerPublic, Role } from '@/types/game';
 import confetti from 'canvas-confetti';
-import { Trophy, Skull, Biohazard, ShieldCheck, RotateCcw, AlertTriangle } from 'lucide-react';
+import { Trophy, Skull, Biohazard, ShieldCheck, RotateCcw, AlertTriangle, Download } from 'lucide-react';
 import { getAvatarIcon } from './AvatarSelector';
+import { networkManager } from '@/lib/networkManager';
 
 interface GameOverModalProps {
   winner: GameWinner;
@@ -13,6 +14,7 @@ interface GameOverModalProps {
   finalRoles?: Record<string, Role>;
   onRestartLobby: () => void;
   isHost: boolean;
+  roomId?: string;
 }
 
 export const GameOverModal: React.FC<GameOverModalProps> = ({
@@ -22,6 +24,7 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
   finalRoles,
   onRestartLobby,
   isHost,
+  roomId,
 }) => {
   useEffect(() => {
     if (winner === 'HUMANS') {
@@ -108,6 +111,19 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
             })}
           </div>
         </div>
+
+        {/* Кнопка скачивания логов матча */}
+        {roomId && (
+          <button
+            type="button"
+            onClick={() => networkManager.downloadGameLogReport(roomId)}
+            className="flex items-center gap-2 px-5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-frost text-xs font-bold transition-all shadow-md cursor-pointer mb-3"
+            title="Скачать файл со всеми логами, рассадкой и личными досье для отладки"
+          >
+            <Download className="w-4 h-4 text-cyan-400" />
+            <span>📥 Скачать полный отчет об игре (.txt)</span>
+          </button>
+        )}
 
         {/* Кнопка реванша */}
         {isHost ? (

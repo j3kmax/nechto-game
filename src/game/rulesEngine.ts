@@ -267,22 +267,12 @@ export function validateExchangeCard(
   }
 
   if (card.code === 'INFECTION') {
-    // Нечто может передавать заражение
+    // Только Нечто может передавать карту Заражения
     if (privateState.role === 'THE_THING') {
       return { valid: true };
     }
-    // Зараженный может передавать заражение
-    if (privateState.role === 'INFECTED') {
-      const infectionCount = privateState.cards.filter(c => c.code === 'INFECTION').length;
-      if (infectionCount < 1) {
-        return { valid: false, error: 'У вас нет карты Заражения.' };
-      }
-      return { valid: true };
-    }
-    // Человек НЕ МОЖЕТ передавать заражение
-    if (privateState.role === 'HUMAN') {
-      return { valid: false, error: 'Люди не могут передавать карты Заражения другим игрокам!' };
-    }
+    // Человек и Зараженный НЕ МОГУТ передавать заражение
+    return { valid: false, error: 'Только Нечто может передавать карты Заражения!' };
   }
 
   return { valid: true };

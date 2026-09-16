@@ -71,10 +71,22 @@ export interface PlayerPublic {
   isBot?: boolean;
 }
 
+export type DeckCardType = 'PANIC' | 'EVENT';
+
+export interface PendingCardChoice {
+  type: 'PERSEVERANCE_PICK' | 'PERSEVERANCE_DISCARD' | 'BLIND_DATE_DISCARD';
+  title: string;
+  description: string;
+  availableCards: GameCard[];
+  remainingCardsToDiscard?: GameCard[];
+}
+
 export interface PlayerPrivate {
   role: Role;
   cards: GameCard[];
   infectedBy?: string; // ID игрока, который заразил
+  privateLogs?: GameLogEntry[]; // Личный журнал событий игрока
+  pendingChoice?: PendingCardChoice | null; // Интерактивный выбор карт (Упорство, Свидание вслепую)
 }
 
 export type TurnPhase = 
@@ -133,6 +145,7 @@ export interface RoomPublicState {
   doors: BarredDoor[];
   discardPile: GameCard[];
   deckCount: number;
+  topDeckType?: DeckCardType | null; // Рубашка верхней карты колоды (Паника или Событие)
   pendingDefense: PendingDefense | null;
   winner: GameWinner;
   winningRoleReason?: string;

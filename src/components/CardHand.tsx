@@ -44,6 +44,7 @@ interface CardHandProps {
   onDefenseCard: (card: GameCard) => void;
   isDefenseTarget: boolean;
   isExchangeTarget: boolean;
+  onOpenRoleMemo?: () => void;
 }
 
 export const getCardVisual = (code: string) => {
@@ -291,6 +292,7 @@ export const CardHand: React.FC<CardHandProps> = ({
   onDefenseCard,
   isDefenseTarget,
   isExchangeTarget,
+  onOpenRoleMemo,
 }) => {
   const [hoveredCardId, setHoveredCardId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<GameCard | null>(null);
@@ -299,7 +301,7 @@ export const CardHand: React.FC<CardHandProps> = ({
   let roleBadge = {
     title: 'ЗДОРОВЫЙ ЧЕЛОВЕК',
     desc: 'Вы человек. Ваша цель: найти и сжечь Нечто.',
-    style: 'border-frost/40 bg-cyan-950/60 text-frost',
+    style: 'border-frost/40 bg-cyan-950/60 text-frost hover:border-frost',
     icon: <ShieldCheck className="w-4 h-4 text-frost" />,
   };
 
@@ -307,14 +309,14 @@ export const CardHand: React.FC<CardHandProps> = ({
     roleBadge = {
       title: 'ВЫ — НЕЧТО',
       desc: 'Вы чудовище! Заражайте полярников через обмен картами.',
-      style: 'border-hazard-crimson/80 bg-red-950/80 text-hazard-crimson animate-pulse',
+      style: 'border-hazard-crimson/80 bg-red-950/80 text-hazard-crimson animate-pulse hover:border-red-400',
       icon: <Skull className="w-4 h-4 text-hazard-crimson" />,
     };
   } else if (playerPrivate.role === 'INFECTED') {
     roleBadge = {
       title: 'ВЫ ЗАРАЖЕНЫ',
-      desc: 'Вы на стороне Нечто. Помогайте монстру победить!',
-      style: 'border-hazard-amber/70 bg-amber-950/70 text-hazard-amber',
+      desc: 'Вы в команде Нечто. Нажмите для памятки правил роли.',
+      style: 'border-hazard-amber/70 bg-amber-950/70 text-hazard-amber hover:border-amber-400',
       icon: <Biohazard className="w-4 h-4 text-hazard-amber" />,
     };
   }
@@ -322,12 +324,20 @@ export const CardHand: React.FC<CardHandProps> = ({
   return (
     <div className="w-full flex flex-col items-center select-none pb-2 pt-1 px-3">
       
-      {/* Секретный бейдж роли (виден только владельцу) */}
-      <div className={`flex items-center gap-2 mb-2 px-3 py-1 rounded-full border shadow-lg backdrop-blur-md transition-all text-xs font-semibold ${roleBadge.style}`}>
+      {/* Секретный бейдж роли (виден только владельцу, кликабелен для памятки) */}
+      <button
+        type="button"
+        onClick={() => onOpenRoleMemo?.()}
+        className={`flex items-center gap-2 mb-2 px-3.5 py-1.5 rounded-full border shadow-lg backdrop-blur-md transition-all text-xs font-semibold cursor-pointer hover:scale-105 active:scale-95 ${roleBadge.style}`}
+        title="Нажмите, чтобы открыть памятку по вашей роли и правилам"
+      >
         {roleBadge.icon}
         <span>{roleBadge.title}</span>
-        <span className="text-[11px] opacity-75 hidden sm:inline">• {roleBadge.desc}</span>
-      </div>
+        <span className="text-[11px] opacity-80 hidden sm:inline">• {roleBadge.desc}</span>
+        <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-black/40 border border-white/10 text-slate-300 ml-1">
+          Памятка
+        </span>
+      </button>
 
       {/* Подсказка текущего шага хода / статуса */}
       <div className="w-full max-w-2xl mb-2 px-3 py-1.5 rounded-xl border border-white/10 bg-polar-900/90 text-center text-xs font-semibold backdrop-blur-md shadow-md transition-all">

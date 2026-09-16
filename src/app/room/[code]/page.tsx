@@ -1,13 +1,14 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { 
   RoomPublicState, 
   PlayerPrivate, 
   GameCard, 
   PlayerPublic,
-  AvatarId 
+  AvatarId,
+  Role
 } from '@/types/game';
 import { networkManager } from '@/lib/networkManager';
 import { soundFx } from '@/lib/soundEffects';
@@ -23,6 +24,8 @@ import { ActionLog } from '@/components/ActionLog';
 import { RulebookModal } from '@/components/RulebookModal';
 import { SoundToggle } from '@/components/SoundToggle';
 import { AvatarSelector } from '@/components/AvatarSelector';
+import { InfectionAlertModal } from '@/components/InfectionAlertModal';
+import { CardChoiceModal } from '@/components/CardChoiceModal';
 import { 
   Biohazard, 
   Flame, 
@@ -33,7 +36,10 @@ import {
   DoorClosed,
   Eye,
   LogOut,
-  ChevronRight
+  ChevronRight,
+  Globe,
+  User,
+  Download
 } from 'lucide-react';
 
 export default function RoomPage() {
@@ -53,11 +59,21 @@ export default function RoomPage() {
 
   // Модальные окна и интеракции
   const [isRulesOpen, setIsRulesOpen] = useState(false);
+  const [isLogOpen, setIsLogOpen] = useState(false);
+  const [logTab, setLogTab] = useState<'station' | 'personal'>('station');
   const [targetCardToPlay, setTargetCardToPlay] = useState<GameCard | null>(null);
   const [dismissedRevealedKey, setDismissedRevealedKey] = useState<string | null>(null);
   const [needJoinPrompt, setNeedJoinPrompt] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joinLoading, setJoinLoading] = useState(false);
+  const [isInfectionAlertOpen, setIsInfectionAlertOpen] = useState(false);
+  const [isInitialInfectionAlert, setIsInitialInfectionAlert] = useState(false);
+  const previousRoleRef = useRef<Role | null>(null);
+
+  const handleOpenLog = (tab: 'station' | 'personal') => {
+    setLogTab(tab);
+    setIsLogOpen(true);
+  };
 
   // 1. Инициализация и проверка локального профиля игрока
   useEffect(() => {
@@ -103,6 +119,22 @@ export default function RoomPage() {
       unsubPrivate();
     };
   }, [roomCode, currentUserId]);
+
+  // 3.1. Отслеживание перехода в статус Зараженного (персональное модальное окно)
+  useEffect(() => {
+    if (!privateHand) return;
+    const currentRole = privateHand.role;
+    const prevRole = previousRoleRef.current;
+
+    // Срабатывает только при переходе здорового человека в статус зараженного
+    if (prevRole === 'HUMAN' && currentRole === 'INFECTED') {
+      soundFx.playInfectionSting();
+      setIsInitialInfectionAlert(true);
+      setIsInfectionAlertOpen(true);
+    }
+
+    previousRoleRef.current = currentRole;
+  }, [privateHand?.role]);
 
   // 4. Звуковые эффекты при смене фаз/ходов
   useEffect(() => {
@@ -344,6 +376,11 @@ export default function RoomPage() {
   // Проверка обмена
   const isExchangeTarget = roomState.phase === 'EXCHANGE_RESPOND' || roomState.phase === 'EXCHANGE_DEFENSE_WAIT';
 
+  // Имя полярника, который передал заражение (если есть)
+  const infectedByPlayerName = privateHand?.infectedBy
+    ? roomState.players.find(p => p.id === privateHand.infectedBy)?.name
+    : undefined;
+
   return (
     <div className="min-h-screen flex flex-col justify-between overflow-x-hidden">
       
@@ -370,12 +407,57 @@ export default function RoomPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Кнопка общего журнала станции */}
+          <button
+            onClick={() => handleOpenLog('station')}
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all shadow-sm cursor-pointer ${
+              isLogOpen && logTab === 'station'
+                ? 'bg-cyan-950 border-cyan-400 text-frost'
+                : 'bg-polar-900/80 border-frost/20 text-slate-300 hover:text-frost hover:bg-polar-850'
+            }`}
+            title="Открыть публичный журнал событий стола"
+          >
+            <Globe className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden md:inline">Журнал</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-cyan-950/90 border border-cyan-500/30 text-cyan-300 font-mono">
+              {roomState.logs.length}
+            </span>
+          </button>
+
+          {/* Кнопка личного досье */}
+          <button
+            onClick={() => handleOpenLog('personal')}
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all shadow-sm cursor-pointer ${
+              isLogOpen && logTab === 'personal'
+                ? 'bg-amber-950/80 border-amber-400 text-amber-300 shadow-amber-950/50'
+                : 'bg-polar-900/80 border-amber-500/30 text-amber-300/90 hover:text-amber-200 hover:bg-polar-850'
+            }`}
+            title="Открыть ваше секретное досье (взятые и отданные карты, проверки, заражение)"
+          >
+            <User className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline">Личное досье</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-amber-950 border border-amber-500/40 text-amber-300 font-mono">
+              {privateHand?.privateLogs?.length || 0}
+            </span>
+          </button>
+
+          {/* Кнопка быстрого скачивания лога */}
+          <button
+            onClick={() => networkManager.downloadGameLogReport(roomCode)}
+            className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl bg-polar-900/80 border border-frost/20 text-xs font-semibold text-frost hover:bg-polar-850 shadow-sm cursor-pointer flex items-center gap-1"
+            title="Скачать полный диагностический отчет по игре (.txt)"
+          >
+            <Download className="w-3.5 h-3.5 text-frost" />
+            <span className="hidden lg:inline text-[11px]">Лог</span>
+          </button>
+
+          {/* Правила игры */}
           <button
             onClick={() => setIsRulesOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-polar-900/80 border border-frost/20 text-xs font-semibold text-frost hover:bg-polar-850 shadow-sm"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-polar-900/80 border border-frost/20 text-xs font-semibold text-frost hover:bg-polar-850 shadow-sm cursor-pointer"
           >
-            <BookOpen className="w-4 h-4" />
+            <BookOpen className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Правила</span>
           </button>
           <SoundToggle />
@@ -406,6 +488,7 @@ export default function RoomPage() {
               doors={roomState.doors}
               discardPile={roomState.discardPile}
               deckCount={roomState.deckCount}
+              topDeckType={roomState.topDeckType}
               pendingDefense={roomState.pendingDefense}
             />
 
@@ -426,6 +509,10 @@ export default function RoomPage() {
                 onDefenseCard={handlePlayDefense}
                 isDefenseTarget={isDefenseTarget}
                 isExchangeTarget={isExchangeTarget}
+                onOpenRoleMemo={() => {
+                  setIsInitialInfectionAlert(false);
+                  setIsInfectionAlertOpen(true);
+                }}
               />
             )}
 
@@ -440,8 +527,16 @@ export default function RoomPage() {
         )}
       </main>
 
-      {/* Журнал публичных событий станции */}
-      <ActionLog logs={roomState.logs} />
+      {/* Журнал публичных событий станции и личное досье */}
+      <ActionLog 
+        logs={roomState.logs} 
+        privateLogs={privateHand?.privateLogs || []} 
+        roomId={roomCode}
+        isOpen={isLogOpen}
+        onOpenChange={setIsLogOpen}
+        activeTab={logTab}
+        onTabChange={setLogTab}
+      />
 
       {/* Модальное окно окна защиты (15 секунд) */}
       {isDefenseTarget && roomState.pendingDefense && (
@@ -493,7 +588,30 @@ export default function RoomPage() {
           players={roomState.players}
           finalRoles={roomState.finalRoles}
           isHost={isHost}
+          roomId={roomCode}
           onRestartLobby={handleRestartLobby}
+        />
+      )}
+
+      {/* Модальное окно оповещения о заражении и памятки роли */}
+      {isInfectionAlertOpen && privateHand && (
+        <InfectionAlertModal
+          isOpen={isInfectionAlertOpen}
+          onClose={() => setIsInfectionAlertOpen(false)}
+          role={privateHand.role}
+          infectedByName={infectedByPlayerName}
+          isInitialAlert={isInitialInfectionAlert}
+        />
+      )}
+
+      {/* Модальное окно интерактивного выбора карт (Упорство / Свидание вслепую) */}
+      {privateHand?.pendingChoice && (
+        <CardChoiceModal
+          choice={privateHand.pendingChoice}
+          onSelectCard={async (cardId: string) => {
+            soundFx.playCardDraw();
+            await networkManager.confirmCardChoice(roomCode, currentUserId, cardId);
+          }}
         />
       )}
 

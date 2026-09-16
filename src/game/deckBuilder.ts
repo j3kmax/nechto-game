@@ -1,7 +1,7 @@
 import { GameCard, CardCode, PlayerPrivate, Role } from '@/types/game';
 import { CARD_DEFINITIONS } from './cardsData';
 
-function generateCard(code: CardCode, uniqueIndex: number): GameCard {
+export function generateCard(code: CardCode, uniqueIndex: number): GameCard {
   const def = CARD_DEFINITIONS[code];
   if (!def) {
     throw new Error(`Определение для карты с кодом ${code} не найдено!`);

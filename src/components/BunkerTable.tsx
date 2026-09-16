@@ -33,6 +33,7 @@ interface BunkerTableProps {
   doors: BarredDoor[];
   discardPile: GameCard[];
   deckCount: number;
+  topDeckType?: 'PANIC' | 'EVENT' | null;
   pendingDefense: PendingDefense | null;
   onSelectPlayer?: (player: PlayerPublic) => void;
   selectablePlayerIds?: string[];
@@ -47,6 +48,7 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
   doors,
   discardPile,
   deckCount,
+  topDeckType,
   pendingDefense,
   onSelectPlayer,
   selectablePlayerIds = [],
@@ -110,15 +112,66 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
           {/* Стопки карт: Колода добора и Сброс */}
           <div className="flex items-center gap-6">
             
-            {/* Колода */}
+            {/* Колода добора (с открытой рубашкой верхней карты: Паника или Событие) */}
             <div className="flex flex-col items-center">
-              <div className="relative w-14 h-20 rounded-lg bg-gradient-to-b from-polar-800 to-polar-950 border border-frost/30 shadow-lg flex items-center justify-center text-frost">
-                <Layers className="w-6 h-6 opacity-70" />
-                <div className="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full bg-frost text-polar-950 text-[10px] font-bold shadow">
-                  {deckCount}
+              {deckCount > 0 ? (
+                <div 
+                  className={`relative w-14 h-20 rounded-lg shadow-xl flex flex-col items-center justify-between p-1.5 transition-all cursor-help border ${
+                    topDeckType === 'PANIC'
+                      ? 'bg-gradient-to-b from-red-900 via-amber-950 to-black border-hazard-amber/80 shadow-amber-950/60 ring-1 ring-hazard-amber/50 animate-pulse'
+                      : 'bg-gradient-to-b from-cyan-950 via-polar-900 to-black border-frost/50 shadow-cyan-950/50'
+                  }`}
+                  title={
+                    topDeckType === 'PANIC'
+                      ? 'Рубашка верхней карты: ПАНИКА! Следующему игроку достанется карта паники с немедленным эффектом.'
+                      : 'Рубашка верхней карты: СОБЫТИЕ. Обычная карта станции.'
+                  }
+                >
+                  {/* Верх рубашки */}
+                  <div className="w-full flex items-center justify-between">
+                    <span className={`text-[7px] font-black uppercase tracking-wider ${
+                      topDeckType === 'PANIC' ? 'text-amber-400' : 'text-frost'
+                    }`}>
+                      {topDeckType === 'PANIC' ? 'ПАНИКА' : 'НЕЧТО'}
+                    </span>
+                    <Layers className={`w-3 h-3 ${topDeckType === 'PANIC' ? 'text-amber-400' : 'text-frost'}`} />
+                  </div>
+
+                  {/* Центр рубашки */}
+                  <div className={`p-1.5 rounded-full border ${
+                    topDeckType === 'PANIC' 
+                      ? 'bg-amber-500/20 border-hazard-amber/50 text-hazard-amber' 
+                      : 'bg-cyan-500/10 border-frost/30 text-frost'
+                  }`}>
+                    {topDeckType === 'PANIC' ? (
+                      <Biohazard className="w-4 h-4 animate-spin [animation-duration:12s]" />
+                    ) : (
+                      <Skull className="w-4 h-4 opacity-80" />
+                    )}
+                  </div>
+
+                  {/* Низ рубашки */}
+                  <span className={`text-[6px] font-bold uppercase tracking-widest text-center ${
+                    topDeckType === 'PANIC' ? 'text-amber-300' : 'text-slate-400'
+                  }`}>
+                    {topDeckType === 'PANIC' ? 'РУБАШКА' : 'СОБЫТИЕ'}
+                  </span>
+
+                  {/* Счётчик карт */}
+                  <div className={`absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[10px] font-bold shadow ${
+                    topDeckType === 'PANIC' ? 'bg-hazard-amber text-polar-950 font-black' : 'bg-frost text-polar-950'
+                  }`}>
+                    {deckCount}
+                  </div>
                 </div>
-              </div>
-              <span className="text-[10px] text-slate-400 mt-1 font-mono">Колода</span>
+              ) : (
+                <div className="relative w-14 h-20 rounded-lg bg-polar-950/60 border border-white/10 flex items-center justify-center text-slate-600">
+                  <span className="text-[9px] italic">Пусто</span>
+                </div>
+              )}
+              <span className="text-[10px] text-slate-400 mt-1 font-mono">
+                {topDeckType === 'PANIC' ? '⚠️ Паника' : 'Колода'}
+              </span>
             </div>
 
             {/* Сброс (По официальным правилам: всегда в закрытую, лицевой стороной вниз!) */}
