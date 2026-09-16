@@ -245,17 +245,47 @@ class NetworkManager {
   public async getAllPlayerPrivates(roomId: string, players: PlayerPublic[]): Promise<Record<string, PlayerPrivate>> {
     roomId = roomId.toUpperCase().trim();
     const local = this.localRooms.get(roomId);
-    const result: Record<string, PlayerPrivate> = { ...(local?.privateStates || {}) };
+    const result: Record<string, PlayerPrivate> = {};
+
+    for (const p of players) {
+      if (local?.privateStates[p.id]) {
+        result[p.id] = { ...local.privateStates[p.id] };
+        if (p.isDead) {
+          result[p.id].cards = [];
+          local.privateStates[p.id].cards = [];
+        }
+      }
+    }
 
     if (isFirebaseConfigured && db) {
       const firestore = db;
       try {
         const promises = players.map(async (p) => {
+          if (p.isDead) {
+            if (result[p.id]) result[p.id].cards = [];
+            if (local?.privateStates[p.id]) local.privateStates[p.id].cards = [];
+            return;
+          }
+
           const snap = await getDoc(doc(firestore, 'rooms', roomId, 'private', p.id));
           if (snap.exists()) {
             const priv = snap.data() as PlayerPrivate;
-            result[p.id] = priv;
-            if (local) local.privateStates[p.id] = priv;
+            if (!result[p.id]) {
+              result[p.id] = priv;
+              if (local) local.privateStates[p.id] = priv;
+            } else {
+              // Обновляем роль и статус заражения из базы
+              result[p.id].role = priv.role;
+              if (priv.infectedBy) result[p.id].infectedBy = priv.infectedBy;
+              // Если локально карт нет, берем из базы
+              if (!result[p.id].cards || result[p.id].cards.length === 0) {
+                result[p.id].cards = priv.cards || [];
+              }
+              // Приватные логи объединяем
+              if (priv.privateLogs && priv.privateLogs.length > (result[p.id].privateLogs?.length || 0)) {
+                result[p.id].privateLogs = priv.privateLogs;
+              }
+            }
           }
         });
         await Promise.all(promises);
@@ -1243,11 +1273,13 @@ class NetworkManager {
       return { success: false, error: 'Предложение обмена не адресовано вам.' };
     }
 
-    // Всегда получаем свежие приватные состояния игроков (из базы или памяти)
-    const freshTargetPriv = await this.getPlayerPrivate(roomId, targetPlayerId, true);
-    if (freshTargetPriv) local.privateStates[targetPlayerId] = freshTargetPriv;
-    const freshSourcePriv = await this.getPlayerPrivate(roomId, offer.fromPlayerId, true);
-    if (freshSourcePriv) local.privateStates[offer.fromPlayerId] = freshSourcePriv;
+    // Получаем приватные состояния игроков: из локальной памяти, если есть, или из базы если отсутствуют
+    if (!local.privateStates[targetPlayerId]) {
+      await this.getPlayerPrivate(roomId, targetPlayerId);
+    }
+    if (!local.privateStates[offer.fromPlayerId]) {
+      await this.getPlayerPrivate(roomId, offer.fromPlayerId);
+    }
 
     const targetPrivate = local.privateStates[targetPlayerId];
     const sourcePrivate = local.privateStates[offer.fromPlayerId];
@@ -1312,6 +1344,8 @@ class NetworkManager {
 
     local.offeredExchangeCard = undefined;
     state.pendingDefense = null;
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local, [offer.fromPlayerId, targetPlayerId]);
 
     const allPrivates = await this.getAllPlayerPrivates(roomId, state.players);
     const winCheck = evaluateWinConditions(state.players, allPrivates);
@@ -1325,12 +1359,11 @@ class NetworkManager {
       }
       state.finalRoles = roles;
       this.addLog(state, `🏆 ИГРА ОКОНЧЕНА! ${winCheck.reason}`, 'WARNING');
+      await this.saveAndSync(roomId, local);
     } else {
       this.endTurn(local, roomId);
     }
 
-    state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local, [offer.fromPlayerId, targetPlayerId]);
     return { success: true };
   }
 
@@ -1434,6 +1467,8 @@ class NetworkManager {
         }
 
         state.pendingDefense = null;
+        state.lastUpdated = Date.now();
+        await this.saveAndSync(roomId, local, [defenderId, defense.sourcePlayerId]);
 
         const allPrivates = await this.getAllPlayerPrivates(roomId, state.players);
         const winCheck = evaluateWinConditions(state.players, allPrivates);
@@ -1447,6 +1482,7 @@ class NetworkManager {
           }
           state.finalRoles = roles;
           this.addLog(state, `🏆 ${winCheck.reason}`, 'WARNING');
+          await this.saveAndSync(roomId, local);
         } else {
           this.addPrivateLog(local, defenderId, `💀 ВАС СОЖГЛИ: Вы погибли в пламени огнемёта и выбыли из игры!`, 'DEATH');
           this.addPrivateLog(local, defense.sourcePlayerId, `🔥 Ваш огнемёт успешно испепелил ${defenderPlayer.name}! Переход к фазе обмена.`, 'ATTACK');
@@ -1731,6 +1767,11 @@ class NetworkManager {
           const toDiscard = excessIdx !== -1 ? priv.cards.splice(excessIdx, 1)[0] : priv.cards.pop()!;
           state.discardPile.unshift(toDiscard);
         }
+        while (priv.cards.length < 4 && local.fullDrawDeck && local.fullDrawDeck.length > 0) {
+          const restoredCard = local.fullDrawDeck.shift()!;
+          priv.cards.push(restoredCard);
+          this.syncDeckState(local);
+        }
         p.handCount = priv.cards.length;
       }
     }
@@ -1755,7 +1796,9 @@ class NetworkManager {
     const botPlayer = state.players.find(p => p.id === currentId);
     if (!botPlayer || !botPlayer.isBot || botPlayer.isDead) return;
 
-    await this.getPlayerPrivate(roomId, currentId, true);
+    if (!local.privateStates[currentId]) {
+      await this.getPlayerPrivate(roomId, currentId);
+    }
     const botPrivate = local.privateStates[currentId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
@@ -1904,7 +1947,9 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === currentId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    await this.getPlayerPrivate(roomId, currentId, true);
+    if (!local.privateStates[currentId]) {
+      await this.getPlayerPrivate(roomId, currentId);
+    }
     const botPrivate = local.privateStates[currentId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
@@ -1934,7 +1979,9 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === targetId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    await this.getPlayerPrivate(roomId, targetId, true);
+    if (!local.privateStates[targetId]) {
+      await this.getPlayerPrivate(roomId, targetId);
+    }
     const botPrivate = local.privateStates[targetId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
 

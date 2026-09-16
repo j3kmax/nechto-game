@@ -393,8 +393,8 @@ async function runAllTests() {
   const quarCard = generateCard('QUARANTINE', 904);
   localObs.privateStates[op1.id].cards[0] = quarCard;
 
-  await networkManager.playCard(roomIdObstacles, op1.id, quarCard.id, op2.id);
-  assert(op2.quarantineTurns === 2, 'Игрок отправлен в карантин на 2 хода');
+  const qRes = await networkManager.playCard(roomIdObstacles, op1.id, quarCard.id, op2.id);
+  assert(op2.quarantineTurns === 2, 'Игрок отправлен в карантин на 2 хода', `res: ${JSON.stringify(qRes)}, op2.quarantineTurns: ${op2.quarantineTurns}`);
 
   // op2 на карантине не может играть действия
   const valQuarAction = validatePlayCard(flameBlocked, op2, localObs.privateStates[op2.id], op1, localObs.publicState);
