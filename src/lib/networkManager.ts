@@ -563,7 +563,7 @@ class NetworkManager {
     this.addLog(local.publicState, `Каждому роздано по 4 секретных карты. Первым начинает ${startPlayer.name}.`);
 
     // Фаза первого добора
-    this.executeDrawPhase(local, roomId);
+    await this.executeDrawPhase(local, roomId);
 
     local.publicState.lastUpdated = Date.now();
     await this.saveAndSync(roomId, local);
@@ -860,12 +860,16 @@ class NetworkManager {
           this.drawEventCard(local, activePrivate);
         }
         activePlayer.handCount = activePrivate.cards.length;
-        this.addLog(state, `🧠 «Забывчивость»! ${activePlayer.name} сбросил ${discardedCount} карт и обновил руку из колоды.`, 'PANIC');
+        this.addLog(state, `🧠 «Забывчивость»! ${activePlayer.name} сбросил ${discardedCount} карт и обновил руку из колоды. Ход завершен!`, 'PANIC');
+        state.lastUpdated = Date.now();
+        await this.saveAndSync(roomId, local, [currentId]);
+        await this.endTurn(local, roomId);
+        return;
       } else if (drawnCard.code === 'PANIC_BLIND_DATE') {
         const newCard = this.drawEventCard(local, activePrivate);
         if (!newCard) {
           this.addLog(state, `🙈 «Свидание вслепую»! Но в колоде не осталось карт событий. Ход завершен.`, 'PANIC');
-          this.endTurn(local, roomId);
+          await this.endTurn(local, roomId);
           return;
         }
 
@@ -879,7 +883,7 @@ class NetworkManager {
             activePlayer.handCount = activePrivate.cards.length;
             this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} тайно сменил карту из руки на карту из колоды. Ход завершен!`, 'PANIC');
           }
-          this.endTurn(local, roomId);
+          await this.endTurn(local, roomId);
           return;
         } else {
           const discardableCards = activePrivate.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED' || activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1));
@@ -892,6 +896,7 @@ class NetworkManager {
           this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} взял верхнюю карту из колоды и выбирает, какую карту сбросить взамен...`, 'PANIC');
           this.addPrivateLog(local, currentId, `Вы вытянули «Свидание вслепую»! Из колоды получена карта «${newCard.name}» (всего 5 карт в руке). Выберите 1 карту для сброса в отбой.`, 'PANIC');
           state.lastUpdated = Date.now();
+          await this.saveAndSync(roomId, local, [currentId]);
           return;
         }
       } else if (drawnCard.code === 'PANIC_CHAIN_REACTION') {
@@ -904,7 +909,11 @@ class NetworkManager {
         this.addLog(state, `Слепое доверие заставляет всех быть настороже.`, 'PANIC');
       }
 
-      await this.executeDrawPhase(local, roomId);
+      // После применения эффекта карты паники (не завершающей ход) фаза действия считается сыгранной самой паникой.
+      // На руке ровно 4 карты, игрок сразу переходит к фазе обмена!
+      state.lastUpdated = Date.now();
+      await this.saveAndSync(roomId, local);
+      await this.advanceToExchange(local, roomId);
       return;
     }
 
@@ -991,7 +1000,7 @@ class NetworkManager {
           targetPlayer.quarantineTurns = 0;
           this.addLog(state, `🪓 ${activePlayer.name} разрушил карантин игрока ${targetPlayer.name}.`, 'INFO');
         }
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1005,7 +1014,7 @@ class NetworkManager {
           });
           this.addLog(state, `🚪 ${activePlayer.name} наглухо заколотил проход к ${targetPlayer.name}!`, 'WARNING');
         }
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1014,14 +1023,14 @@ class NetworkManager {
           targetPlayer.quarantineTurns = 2;
           this.addLog(state, `☣️ ${targetPlayer.name} отправлен в КАРАНТИН на 2 хода!`, 'WARNING');
         }
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
       case 'LOOK_AROUND': {
         state.direction = state.direction === 1 ? -1 : 1;
         this.addLog(state, `👀 ${activePlayer.name} сыграл «Гляди по сторонам»! Очередность хода и направление обмена меняются: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'INFO');
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1045,7 +1054,7 @@ class NetworkManager {
           this.addPrivateLog(local, playerId, `🔬 Анализ крови показал карты ${targetPlayer.name}: ${(targetCards || []).map(c => `«${c.name}»`).join(', ')}.`, 'INFO');
           this.addPrivateLog(local, targetPlayer.id, `🔬 ${activePlayer.name} провёл у вас анализ крови и просмотрел все ваши карты!`, 'WARNING');
         }
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1076,7 +1085,7 @@ class NetworkManager {
             this.addPrivateLog(local, targetPlayer.id, `👁️ ${activePlayer.name} вытащил и посмотрел вашу случайную карту «${randomCard.name}» (карта возвращена вам).`, 'WARNING');
           }
         }
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1088,7 +1097,7 @@ class NetworkManager {
         };
         this.addLog(state, `🥃 ${activePlayer.name} выпил виски и раскрыл все свои карты для проверки чистоты!`, 'INFO');
         this.addPrivateLog(local, playerId, `🥃 Вы выпили виски и раскрыли все свои карты (${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}) всем игрокам за столом.`, 'INFO');
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1123,7 +1132,7 @@ class NetworkManager {
         activePlayer.seatIndex = targetPlayer.seatIndex;
         targetPlayer.seatIndex = tempSeat;
         this.addLog(state, `🔄 ${activePlayer.name} и ${targetPlayer.name} поменялись местами за столом!`, 'INFO');
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
       }
 
@@ -1163,7 +1172,7 @@ class NetworkManager {
 
         if (eventCards.length === 0) {
           this.addLog(state, `В ящиках снабжения ничего не найдено!`);
-          this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId);
           break;
         }
 
@@ -1180,7 +1189,7 @@ class NetworkManager {
             state.discardPile.unshift(discarded);
           }
           activePlayer.handCount = activePrivate.cards.length;
-          this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId);
         } else {
           this.addPrivateLog(local, playerId, `Вы нашли 3 карты снабжения: ${eventCards.map(c => `«${c.name}»`).join(', ')}. Выберите 1 для добавления в руку!`, 'INFO');
           activePrivate.pendingChoice = {
@@ -1194,7 +1203,7 @@ class NetworkManager {
       }
 
       default:
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
         break;
     }
 
@@ -1238,7 +1247,7 @@ class NetworkManager {
 
     this.addLog(state, `${activePlayer.name} сбросил карту в стопку сброса в темноте.`);
     this.addPrivateLog(local, playerId, `🗑️ Вы сбросили карту «${card.name}» в стопку сброса.`, 'INFO');
-    this.advanceToExchange(local, roomId);
+    await this.advanceToExchange(local, roomId);
 
     state.lastUpdated = Date.now();
     await this.saveAndSync(roomId, local, [playerId]);
@@ -1246,14 +1255,14 @@ class NetworkManager {
   }
 
   // Переход к фазе обмена
-  private advanceToExchange(local: LocalGameState, roomId: string) {
+  private async advanceToExchange(local: LocalGameState, roomId: string): Promise<void> {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
     const activePlayer = state.players.find(p => p.id === currentId);
 
     if (activePlayer && activePlayer.quarantineTurns > 0) {
       this.addLog(state, `${activePlayer.name} находится в карантине и пропускает обмен картами.`);
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
       return;
     }
 
@@ -1270,27 +1279,30 @@ class NetworkManager {
     }
 
     if (!targetNeighbor || targetNeighbor.isDead) {
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
       return;
     }
 
     if (isBlocked) {
       this.addLog(state, `🚪 Обмен картами заблокирован заколоченной дверью! Ход завершен.`, 'INFO');
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
       return;
     }
 
     if (targetNeighbor.quarantineTurns > 0) {
       this.addLog(state, `☣️ Сосед находится в карантине. Обмен невозможен.`);
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
       return;
     }
 
     state.phase = 'EXCHANGE_OFFER';
     this.addLog(state, `Фаза обмена: ${activePlayer?.name} должен выбрать карту для передачи ${targetNeighbor.name}.`, 'EXCHANGE');
 
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local);
+
     if (activePlayer?.isBot) {
-      this.scheduleBotAction(() => this.runBotExchangeOffer(roomId), 1200);
+      this.scheduleBotAction(() => this.runBotExchangeOffer(roomId), 1200, `bot_offer_${currentId}`);
     }
   }
 
@@ -1476,7 +1488,7 @@ class NetworkManager {
       this.addLog(state, `🏆 ИГРА ОКОНЧЕНА! ${winCheck.reason}`, 'WARNING');
       await this.saveAndSync(roomId, local);
     } else {
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
     }
 
     return { success: true };
@@ -1515,13 +1527,13 @@ class NetworkManager {
         this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «НИКАКОГО ШАШЛЫКА!» и спасся от огнемёта!`, 'DEFENSE');
         this.drawReplacementCardForDefender(local, defenderId);
         state.pendingDefense = null;
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
       } else if (card.code === 'MISSED') {
         if (defense.actionType === 'ATTACK') {
           this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «МИМО!» и уклонился от огнемёта!`, 'DEFENSE');
           this.drawReplacementCardForDefender(local, defenderId);
           state.pendingDefense = null;
-          this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId);
         } else if (defense.actionType === 'EXCHANGE') {
           this.addLog(state, `↪️ ${defenderPlayer.name} сыграл «МИМО!» — обмен передается следующему игроку!`, 'DEFENSE');
           this.drawReplacementCardForDefender(local, defenderId);
@@ -1533,11 +1545,11 @@ class NetworkManager {
           const redirectTarget = living[nextIdx];
 
           if (redirectTarget && redirectTarget.id !== defense.sourcePlayerId && !redirectTarget.isDead && redirectTarget.quarantineTurns === 0) {
-            this.forwardExchangeOffer(local, roomId, defense.sourcePlayerId, redirectTarget.id, defense.offeredCard || defense.actionCard);
+            await this.forwardExchangeOffer(local, roomId, defense.sourcePlayerId, redirectTarget.id, defense.offeredCard || defense.actionCard);
           } else {
             this.addLog(state, `Обмен картами завершен.`);
             local.offeredExchangeCard = undefined;
-            this.endTurn(local, roomId);
+            await this.endTurn(local, roomId);
           }
         }
       } else if (card.code === 'NO_THANKS') {
@@ -1545,7 +1557,7 @@ class NetworkManager {
         this.drawReplacementCardForDefender(local, defenderId);
         state.pendingDefense = null;
         local.offeredExchangeCard = undefined;
-        this.endTurn(local, roomId);
+        await this.endTurn(local, roomId);
       } else if (card.code === 'FEAR') {
         this.addLog(state, `😱 ${defenderPlayer.name} сыграл «СТРАХ»! Обмен отменен, а предложенная карта раскрыта!`, 'DEFENSE');
         this.drawReplacementCardForDefender(local, defenderId);
@@ -1561,12 +1573,12 @@ class NetworkManager {
         }
         state.pendingDefense = null;
         local.offeredExchangeCard = undefined;
-        this.endTurn(local, roomId);
+        await this.endTurn(local, roomId);
       } else if (card.code === 'IM_FINE_HERE') {
         this.addLog(state, `🛡️ ${defenderPlayer.name} сыграл «МНЕ И ЗДЕСЬ НЕПЛОХО»! Смена мест отменена.`, 'DEFENSE');
         this.drawReplacementCardForDefender(local, defenderId);
         state.pendingDefense = null;
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
       }
     } else {
       if (defense.actionType === 'ATTACK' && defense.actionCard.code === 'FLAMETHROWER') {
@@ -1601,7 +1613,7 @@ class NetworkManager {
         } else {
           this.addPrivateLog(local, defenderId, `💀 ВАС СОЖГЛИ: Вы погибли в пламени огнемёта и выбыли из игры!`, 'DEATH');
           this.addPrivateLog(local, defense.sourcePlayerId, `🔥 Ваш огнемёт успешно испепелил ${defenderPlayer.name}! Переход к фазе обмена.`, 'ATTACK');
-          this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId);
         }
       } else if (defense.actionType === 'EXCHANGE') {
         state.phase = 'EXCHANGE_RESPOND';
@@ -1609,7 +1621,7 @@ class NetworkManager {
         this.addLog(state, `${defenderPlayer.name} соглашается на обмен и выбирает карту.`, 'EXCHANGE');
 
         if (defenderPlayer.isBot) {
-          this.scheduleBotAction(() => this.runBotExchangeResponse(roomId), 1200);
+          this.scheduleBotAction(() => this.runBotExchangeResponse(roomId), 1200, `bot_resp_${defenderPlayer.id}`);
         }
       } else if (defense.actionType === 'SWITCH_PLACES') {
         const sourcePlayer = state.players.find(p => p.id === defense.sourcePlayerId);
@@ -1620,7 +1632,7 @@ class NetworkManager {
           this.addLog(state, `🔄 ${sourcePlayer.name} и ${defenderPlayer.name} поменялись местами за столом!`, 'INFO');
         }
         state.pendingDefense = null;
-        this.advanceToExchange(local, roomId);
+        await this.advanceToExchange(local, roomId);
       }
     }
 
@@ -1667,11 +1679,11 @@ class NetworkManager {
   }
 
   // Перенаправление обмена при розыгрыше «МИМО!» (Официальные правила, стр. 12)
-  private forwardExchangeOffer(local: LocalGameState, roomId: string, sourcePlayerId: string, targetPlayerId: string, card: GameCard) {
+  private async forwardExchangeOffer(local: LocalGameState, roomId: string, sourcePlayerId: string, targetPlayerId: string, card: GameCard): Promise<void> {
     const state = local.publicState;
     const targetPlayer = state.players.find(p => p.id === targetPlayerId);
     if (!targetPlayer) {
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
       return;
     }
 
@@ -1681,7 +1693,10 @@ class NetworkManager {
       card,
     };
 
-    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
+    if (!local.privateStates[targetPlayerId]) {
+      await this.getPlayerPrivate(roomId, targetPlayerId);
+    }
+    const targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
     const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR' || c.code === 'MISSED');
 
     if (hasDefense) {
@@ -1697,15 +1712,18 @@ class NetworkManager {
       state.phase = 'EXCHANGE_DEFENSE_WAIT';
       this.addLog(state, `Обмен перенаправлен на ${targetPlayer.name}... Есть ли защита?`, 'EXCHANGE');
       if (targetPlayer.isBot) {
-        this.scheduleBotAction(() => this.runBotDefense(roomId), 1500);
+        this.scheduleBotAction(() => this.runBotDefense(roomId), 1500, `bot_def_${targetPlayer.id}`);
       }
     } else {
       state.phase = 'EXCHANGE_RESPOND';
       this.addLog(state, `${targetPlayer.name} должен выбрать карту для ответного обмена.`, 'EXCHANGE');
       if (targetPlayer.isBot) {
-        this.scheduleBotAction(() => this.runBotExchangeResponse(roomId), 1500);
+        this.scheduleBotAction(() => this.runBotExchangeResponse(roomId), 1500, `bot_resp_${targetPlayer.id}`);
       }
     }
+
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local, [sourcePlayerId, targetPlayerId]);
   }
 
   // 12. Подтверждение выбора карты (Упорство / Свидание вслепую)
@@ -1770,7 +1788,7 @@ class NetworkManager {
       this.addPrivateLog(local, playerId, `Вы сбросили карту «${card.name}» в отбой. На руке 4 карты. Переход к фазе обмена.`, 'INFO');
 
       activePrivate.pendingChoice = null;
-      this.advanceToExchange(local, roomId);
+      await this.advanceToExchange(local, roomId);
 
       state.lastUpdated = Date.now();
       await this.saveAndSync(roomId, local, [playerId]);

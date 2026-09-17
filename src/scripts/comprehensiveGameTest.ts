@@ -609,10 +609,10 @@ async function runAllTests() {
     generateCard('FLAMETHROWER', 1309),
     generateCard('FLAMETHROWER', 1310),
   ];
-  (networkManager as any).executeDrawPhase(localMove, roomIdMove);
+  await (networkManager as any).executeDrawPhase(localMove, roomIdMove);
   assert(
-    localMove.privateStates[mp1.id].cards.length === 5 && localMove.publicState.phase === 'ACTION',
-    'После «Забывчивости» рука полярника обновлена и добрана карта для фазы действий (рука = 5)'
+    localMove.privateStates[mp1.id].cards.length === 4 && localMove.publicState.currentTurnPlayerId !== mp1.id,
+    'После «Забывчивости» на руке ровно 4 карты, а ход завершен и передан следующему игроку'
   );
 
   // --- БЛОК 11: АВТОНОМНАЯ СИМУЛЯЦИЯ 3 ПОЛНЫХ ИГР 4 БОТОВ ---
