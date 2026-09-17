@@ -19,6 +19,14 @@ import {
   isDoorBetween,
   getLivingPlayers
 } from '@/game/rulesEngine';
+import { 
+  decideBotTurnAction, 
+  decideBotDefenseCard, 
+  decideBotExchangeOfferCard, 
+  decideBotExchangeResponseCard, 
+  decideBotChainReactionCard,
+  findBestDiscardCandidate
+} from '@/game/botAI';
 import { isFirebaseConfigured, db } from './firebase';
 import { 
   doc, 
@@ -218,6 +226,29 @@ class NetworkManager {
     } else {
       local.publicState.topDeckType = null;
     }
+  }
+
+  private drawCardFromDeck(local: LocalGameState): GameCard | null {
+    const state = local.publicState;
+    if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
+      if (state.discardPile.length > 0) {
+        local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
+        state.discardPile = [];
+        this.addLog(state, `Колода опустела. Стопка сброса перетасована.`);
+      } else {
+        return null;
+      }
+    }
+    const card = local.fullDrawDeck.shift() || null;
+    this.syncDeckState(local);
+    return card;
+  }
+
+  private async getOrFetchPlayerPrivate(local: LocalGameState, roomId: string, playerId: string): Promise<PlayerPrivate | null> {
+    if (local.privateStates[playerId]) return local.privateStates[playerId];
+    const priv = await this.getPlayerPrivate(roomId, playerId);
+    if (priv) local.privateStates[playerId] = priv;
+    return priv || null;
   }
 
   // Получить секретное состояние игрока (из памяти или Firestore)
@@ -573,18 +604,8 @@ class NetworkManager {
     const state = local.publicState;
     let safety = 0;
     while (safety++ < 40) {
-      if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
-        if (state.discardPile.length > 0) {
-          local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
-          state.discardPile = [];
-          this.syncDeckState(local);
-        } else {
-          break;
-        }
-      }
-      const top = local.fullDrawDeck.shift();
+      const top = this.drawCardFromDeck(local);
       if (!top) break;
-      this.syncDeckState(local);
       if (top.category === 'PANIC') {
         state.discardPile.unshift(top);
         continue;
@@ -644,10 +665,7 @@ class NetworkManager {
     chain.activePlayerId = playerId;
     chain.targetPlayerId = targetId;
 
-    if (!local.privateStates[playerId]) {
-      await this.getPlayerPrivate(roomId, playerId);
-    }
-    const priv = local.privateStates[playerId];
+    const priv = await this.getOrFetchPlayerPrivate(local, roomId, playerId);
     if (!priv) return;
 
     const validCards = priv.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'HUMAN'));
@@ -682,10 +700,7 @@ class NetworkManager {
       const toId = order[(i + 1) % order.length];
       const cardId = chain.picks[fromId];
 
-      if (!local.privateStates[fromId]) {
-        await this.getPlayerPrivate(roomId, fromId);
-      }
-      const fromPriv = local.privateStates[fromId];
+      const fromPriv = await this.getOrFetchPlayerPrivate(local, roomId, fromId);
       if (!fromPriv) continue;
 
       let cardIdx = fromPriv.cards.findIndex(c => c.id === cardId || c.code === cardId);
@@ -698,10 +713,7 @@ class NetworkManager {
     }
 
     for (const item of cardsToTransfer) {
-      if (!local.privateStates[item.toId]) {
-        await this.getPlayerPrivate(roomId, item.toId);
-      }
-      const toPriv = local.privateStates[item.toId];
+      const toPriv = await this.getOrFetchPlayerPrivate(local, roomId, item.toId);
       const fromPlayer = state.players.find(p => p.id === item.fromId);
       const toPlayer = state.players.find(p => p.id === item.toId);
 
@@ -741,20 +753,10 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === botId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    if (!local.privateStates[botId]) {
-      await this.getPlayerPrivate(roomId, botId);
-    }
-    const botPriv = local.privateStates[botId];
+    const botPriv = await this.getOrFetchPlayerPrivate(local, roomId, botId);
     if (!botPriv || botPriv.cards.length === 0) return;
 
-    let cardToPass: GameCard | undefined;
-    if (botPriv.role === 'THE_THING') {
-      cardToPass = botPriv.cards.find(c => c.code === 'INFECTION');
-    }
-    if (!cardToPass) {
-      cardToPass = botPriv.cards.find(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || botPriv.role !== 'HUMAN')) || botPriv.cards[0];
-    }
-
+    const cardToPass = decideBotChainReactionCard(botPriv);
     if (cardToPass) {
       await this.confirmCardChoice(roomId, botId, cardToPass.id);
     }
@@ -764,33 +766,40 @@ class NetworkManager {
   private async executeDrawPhase(local: LocalGameState, roomId: string): Promise<void> {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
-    const fullDeck = local.fullDrawDeck;
 
-    if (!fullDeck || fullDeck.length === 0) {
-      if (state.discardPile.length > 0) {
-        local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
-        state.discardPile = [];
-        this.addLog(state, `Колода опустела. Стопка сброса перетасована.`);
-      } else {
-        state.phase = 'ACTION';
-        return;
-      }
+    const drawnCard = this.drawCardFromDeck(local);
+    if (!drawnCard) {
+      state.phase = 'ACTION';
+      return;
     }
 
-    const drawnCard = local.fullDrawDeck!.shift()!;
-    this.syncDeckState(local);
-
     const activePlayer = state.players.find(p => p.id === currentId);
-    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[currentId];
+    let activePrivate = local.privateStates[currentId];
     if (!activePrivate) {
-      activePrivate = await this.getPlayerPrivate(roomId, currentId);
-      if (activePrivate) local.privateStates[currentId] = activePrivate;
+      activePrivate = (await this.getOrFetchPlayerPrivate(local, roomId, currentId))!;
     }
 
     if (!activePlayer || !activePrivate) return;
 
     // ПРОВЕРКА КАРТЫ ПАНИКИ
     if (drawnCard.category === 'PANIC') {
+      if (activePlayer.quarantineTurns > 0) {
+        state.discardPile.unshift(drawnCard);
+        this.addLog(state, `☣️ ${activePlayer.name} находится в карантине. Вытянутая карта паники «${drawnCard.name}» сброшена без эффекта!`, 'INFO');
+        this.addPrivateLog(local, currentId, `☣️ Вы находитесь в карантине. Вытянутая карта паники «${drawnCard.name}» сброшена без эффекта.`, 'INFO');
+        const replacement = this.drawEventCard(local, activePrivate);
+        if (replacement) {
+          activePlayer.handCount = activePrivate.cards.length;
+        }
+        state.phase = 'ACTION';
+        state.lastUpdated = Date.now();
+        await this.saveAndSync(roomId, local, [currentId]);
+        if (activePlayer.isBot) {
+          this.scheduleBotAction(() => this.runBotTurn(roomId), 1200, `bot_turn_${currentId}`);
+        }
+        return;
+      }
+
       this.addLog(state, `ПАНИКА! ${activePlayer.name} вытянул карту паники «${drawnCard.name}»!`, 'PANIC');
       this.addPrivateLog(local, currentId, `⚠️ Вы вытянули из колоды карту паники «${drawnCard.name}»! Она сыграна немедленно.`, 'PANIC');
       state.discardPile.unshift(drawnCard);
@@ -954,11 +963,7 @@ class NetworkManager {
     if (state.phase !== 'ACTION') return { success: false, error: 'Сейчас нельзя разыгрывать карты.' };
 
     const activePlayer = state.players.find(p => p.id === playerId);
-    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[playerId];
-    if (!activePrivate) {
-      activePrivate = await this.getPlayerPrivate(roomId, playerId);
-      if (activePrivate) local.privateStates[playerId] = activePrivate;
-    }
+    const activePrivate = await this.getOrFetchPlayerPrivate(local, roomId, playerId);
     if (!activePlayer || !activePrivate) return { success: false, error: 'Игрок не найден.' };
 
     const cardIndex = activePrivate.cards.findIndex(c => c.id === cardId || c.code === cardId || c.id.startsWith(cardId));
@@ -1042,22 +1047,16 @@ class NetworkManager {
 
       case 'ANALYSIS': {
         if (targetPlayer) {
-          let targetCards = local.privateStates[targetPlayer.id]?.cards;
-          if (!targetCards || targetCards.length === 0) {
-            const priv = await this.getPlayerPrivate(roomId, targetPlayer.id);
-            if (priv) {
-              local.privateStates[targetPlayer.id] = priv;
-              targetCards = priv.cards;
-            }
-          }
+          const priv = await this.getOrFetchPlayerPrivate(local, roomId, targetPlayer.id);
+          const targetCards = priv?.cards || [];
           state.revealedCards = {
             fromPlayerId: targetPlayer.id,
             targetPlayerId: playerId,
-            cards: targetCards || [],
+            cards: targetCards,
             title: `Анализ крови: карты игрока ${targetPlayer.name}`,
           };
           this.addLog(state, `🔬 ${activePlayer.name} провёл анализ крови у ${targetPlayer.name}.`, 'INFO');
-          this.addPrivateLog(local, playerId, `🔬 Анализ крови показал карты ${targetPlayer.name}: ${(targetCards || []).map(c => `«${c.name}»`).join(', ')}.`, 'INFO');
+          this.addPrivateLog(local, playerId, `🔬 Анализ крови показал карты ${targetPlayer.name}: ${targetCards.map(c => `«${c.name}»`).join(', ')}.`, 'INFO');
           this.addPrivateLog(local, targetPlayer.id, `🔬 ${activePlayer.name} провёл у вас анализ крови и просмотрел все ваши карты!`, 'WARNING');
         }
         await this.advanceToExchange(local, roomId);
@@ -1066,15 +1065,8 @@ class NetworkManager {
 
       case 'SUSPICION': {
         if (targetPlayer) {
-          let targetCards = local.privateStates[targetPlayer.id]?.cards;
-          if (!targetCards || targetCards.length === 0) {
-            const priv = await this.getPlayerPrivate(roomId, targetPlayer.id);
-            if (priv) {
-              local.privateStates[targetPlayer.id] = priv;
-              targetCards = priv.cards;
-            }
-          }
-          const cardsList = targetCards || [];
+          const priv = await this.getOrFetchPlayerPrivate(local, roomId, targetPlayer.id);
+          const cardsList = priv?.cards || [];
           let randomCard: GameCard | null = null;
           if (cardsList.length > 0) {
             randomCard = cardsList[Math.floor(Math.random() * cardsList.length)];
@@ -1110,11 +1102,7 @@ class NetworkManager {
       case 'SWITCH_PLACES':
       case 'GET_OUT_OF_HERE': {
         if (!targetPlayer) break;
-        let targetPrivate: PlayerPrivate | null = local.privateStates[targetPlayer.id] || null;
-        if (!targetPrivate) {
-          targetPrivate = await this.getPlayerPrivate(roomId, targetPlayer.id);
-          if (targetPrivate) local.privateStates[targetPlayer.id] = targetPrivate;
-        }
+        const targetPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetPlayer.id);
 
         const hasDefense = targetPrivate?.cards.some(c => c.code === 'IM_FINE_HERE');
         if (hasDefense) {
@@ -1155,18 +1143,8 @@ class NetworkManager {
         const eventCards: GameCard[] = [];
         let safety = 0;
         while (eventCards.length < 3 && safety++ < 60) {
-          if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
-            if (state.discardPile.length > 0) {
-              local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
-              state.discardPile = [];
-              this.addLog(state, `Колода пополнена из стопки сброса для поиска снабжения.`);
-              this.syncDeckState(local);
-            } else {
-              break;
-            }
-          }
-          const topCard = local.fullDrawDeck!.shift()!;
-          this.syncDeckState(local);
+          const topCard = this.drawCardFromDeck(local);
+          if (!topCard) break;
           if (topCard.category === 'PANIC') {
             state.discardPile.unshift(topCard);
             this.addLog(state, `📦 При обыске с «Упорством» карта паники «${topCard.name}» пропущена и отправлена в сброс (её эффект не активируется по правилам).`, 'INFO');
@@ -1233,11 +1211,7 @@ class NetworkManager {
     }
 
     const activePlayer = state.players.find(p => p.id === playerId);
-    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[playerId];
-    if (!activePrivate) {
-      activePrivate = await this.getPlayerPrivate(roomId, playerId);
-      if (activePrivate) local.privateStates[playerId] = activePrivate;
-    }
+    const activePrivate = await this.getOrFetchPlayerPrivate(local, roomId, playerId);
     if (!activePlayer || !activePrivate) return { success: false, error: 'Игрок не найден.' };
 
     const cardIndex = activePrivate.cards.findIndex(c => c.id === cardId || c.code === cardId || c.id.startsWith(cardId));
@@ -1326,8 +1300,9 @@ class NetworkManager {
     }
 
     const activePlayer = state.players.find(p => p.id === playerId);
-    const activePrivate = local.privateStates[playerId];
-    const card = activePrivate?.cards.find(c => c.id === cardId || c.code === cardId || c.id.startsWith(cardId));
+    const activePrivate = await this.getOrFetchPlayerPrivate(local, roomId, playerId);
+    if (!activePrivate) return { success: false, error: 'Игрок не найден.' };
+    const card = activePrivate.cards.find(c => c.id === cardId || c.code === cardId || c.id.startsWith(cardId));
     if (!card) return { success: false, error: 'Карта не найдена.' };
 
     const validation = validateExchangeCard(card, activePrivate);
@@ -1351,11 +1326,7 @@ class NetworkManager {
       card,
     };
 
-    let targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetNeighbor.id];
-    if (!targetPrivate) {
-      targetPrivate = await this.getPlayerPrivate(roomId, targetNeighbor.id);
-      if (targetPrivate) local.privateStates[targetNeighbor.id] = targetPrivate;
-    }
+    const targetPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetNeighbor.id);
     const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR' || c.code === 'MISSED');
 
     if (hasDefense) {
@@ -1408,16 +1379,8 @@ class NetworkManager {
       return { success: false, error: 'Предложение обмена не адресовано вам.' };
     }
 
-    // Получаем приватные состояния игроков: из локальной памяти, если есть, или из базы если отсутствуют
-    if (!local.privateStates[targetPlayerId]) {
-      await this.getPlayerPrivate(roomId, targetPlayerId);
-    }
-    if (!local.privateStates[offer.fromPlayerId]) {
-      await this.getPlayerPrivate(roomId, offer.fromPlayerId);
-    }
-
-    const targetPrivate = local.privateStates[targetPlayerId];
-    const sourcePrivate = local.privateStates[offer.fromPlayerId];
+    const targetPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetPlayerId);
+    const sourcePrivate = await this.getOrFetchPlayerPrivate(local, roomId, offer.fromPlayerId);
     if (!targetPrivate || !sourcePrivate) return { success: false, error: 'Данные игроков не найдены.' };
 
     let cardIndex = targetPrivate.cards.findIndex(c => c.id === cardId);
@@ -1658,17 +1621,8 @@ class NetworkManager {
 
     let safetyCounter = 0;
     while (safetyCounter++ < 20) {
-      if (!local.fullDrawDeck || local.fullDrawDeck.length === 0) {
-        if (state.discardPile.length > 0) {
-          local.fullDrawDeck = [...state.discardPile].sort(() => Math.random() - 0.5);
-          state.discardPile = [];
-          this.addLog(state, `Колода пополнена из сброса для добора карты взамен защиты.`);
-        } else {
-          break;
-        }
-      }
-      const drawn = local.fullDrawDeck.shift()!;
-      state.deckCount = local.fullDrawDeck.length;
+      const drawn = this.drawCardFromDeck(local);
+      if (!drawn) break;
 
       // Если взята карта паники при доборе взамен защиты, она сбрасывается без эффекта (стр. 12 правил)
       if (drawn.category === 'PANIC') {
@@ -1679,7 +1633,6 @@ class NetworkManager {
 
       defenderPrivate.cards.push(drawn);
       defenderPlayer.handCount = defenderPrivate.cards.length;
-      this.syncDeckState(local);
       this.addLog(state, `🎴 ${defenderPlayer.name} добрал 1 карту из колоды взамен сыгранной защиты.`);
       this.addPrivateLog(local, defenderId, `🎴 Вы добрали карту «${drawn.name}» взамен сыгранной защиты.`, 'DEFENSE');
       break;
@@ -1701,10 +1654,7 @@ class NetworkManager {
       card,
     };
 
-    if (!local.privateStates[targetPlayerId]) {
-      await this.getPlayerPrivate(roomId, targetPlayerId);
-    }
-    const targetPrivate: PlayerPrivate | null | undefined = local.privateStates[targetPlayerId];
+    const targetPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetPlayerId);
     const hasDefense = targetPrivate?.cards.some(c => c.code === 'NO_THANKS' || c.code === 'FEAR' || c.code === 'MISSED');
 
     if (hasDefense) {
@@ -1742,11 +1692,7 @@ class NetworkManager {
 
     const state = local.publicState;
     const activePlayer = state.players.find(p => p.id === playerId);
-    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[playerId];
-    if (!activePrivate) {
-      activePrivate = await this.getPlayerPrivate(roomId, playerId);
-      if (activePrivate) local.privateStates[playerId] = activePrivate;
-    }
+    const activePrivate = await this.getOrFetchPlayerPrivate(local, roomId, playerId);
     if (!activePlayer || !activePrivate) return { success: false, error: 'Игрок не найден.' };
 
     const choice = activePrivate.pendingChoice;
@@ -1946,24 +1892,20 @@ class NetworkManager {
       const priv = local.privateStates[currentId];
       if (priv) {
         while (priv.cards.length > 4) {
+          const toDiscard = findBestDiscardCandidate(priv.cards, priv.role);
+          if (!toDiscard) break;
+          const idx = priv.cards.findIndex(c => c.id === toDiscard.id);
+          if (idx === -1) break;
+          priv.cards.splice(idx, 1);
           handModified = true;
-          let excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (priv.role === 'INFECTED' && priv.cards.filter(x => x.code === 'INFECTION').length > 1)));
-          if (excessIdx === -1) {
-            excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && c.code !== 'INFECTION');
-          }
-          if (excessIdx !== -1) {
-            const toDiscard = priv.cards.splice(excessIdx, 1)[0];
-            state.discardPile.unshift(toDiscard);
-            this.addPrivateLog(local, currentId, `⚠️ Авто-сброс лишней карты «${toDiscard.name}» при конце хода. На руке (${priv.cards.length} карт): ${priv.cards.map(c => `«${c.name}»`).join(', ')}.`, 'WARNING');
-          } else {
-            break;
-          }
+          state.discardPile.unshift(toDiscard);
+          this.addPrivateLog(local, currentId, `⚠️ Авто-сброс лишней карты «${toDiscard.name}» при конце хода. На руке (${priv.cards.length} карт): ${priv.cards.map(c => `«${c.name}»`).join(', ')}.`, 'WARNING');
         }
-        while (priv.cards.length < 4 && local.fullDrawDeck && local.fullDrawDeck.length > 0) {
+        while (priv.cards.length < 4) {
+          const restoredCard = this.drawCardFromDeck(local);
+          if (!restoredCard) break;
           handModified = true;
-          const restoredCard = local.fullDrawDeck.shift()!;
           priv.cards.push(restoredCard);
-          this.syncDeckState(local);
           this.addPrivateLog(local, currentId, `⚠️ Авто-добор карты «${restoredCard.name}» до 4 карт при конце хода. На руке (${priv.cards.length} карт): ${priv.cards.map(c => `«${c.name}»`).join(', ')}.`, 'WARNING');
         }
         currentTurnPlayer.handCount = priv.cards.length;
@@ -1992,133 +1934,24 @@ class NetworkManager {
     const botPlayer = state.players.find(p => p.id === currentId);
     if (!botPlayer || !botPlayer.isBot || botPlayer.isDead) return;
 
-    if (!local.privateStates[currentId]) {
-      await this.getPlayerPrivate(roomId, currentId);
-    }
-    const botPrivate = local.privateStates[currentId];
+    const botPrivate = await this.getOrFetchPlayerPrivate(local, roomId, currentId);
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
     // Добираем карту до 5, если на руке меньше 5 карт перед совершением действия
-    while (botPrivate.cards.length < 5 && local.fullDrawDeck && local.fullDrawDeck.length > 0) {
-      const card = local.fullDrawDeck.shift()!;
+    while (botPrivate.cards.length < 5) {
+      const card = this.drawCardFromDeck(local);
+      if (!card) break;
       botPrivate.cards.push(card);
-      this.syncDeckState(local);
       botPlayer.handCount = botPrivate.cards.length;
     }
 
-    // Если бот на карантине - может только сбросить карту
-    if (botPlayer.quarantineTurns > 0) {
-      const discardCandidate = botPrivate.cards.find(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || botPrivate.role !== 'INFECTED' || botPrivate.cards.filter(x => x.code === 'INFECTION').length > 1)) || botPrivate.cards[0];
-      if (discardCandidate) {
-        await this.discardCard(roomId, currentId, discardCandidate.id);
-      }
-      return;
-    }
+    const decision = decideBotTurnAction(botPlayer, botPrivate, state);
+    if (!decision) return;
 
-    const living = getLivingPlayers(state.players);
-    const neighbors = getPlayerNeighbors(state.players, currentId, state.direction, state.doors);
-    const adjacentTargets = [neighbors.leftNeighbor, neighbors.rightNeighbor].filter((p): p is PlayerPublic => Boolean(p && !p.isDead));
-
-    const cards = botPrivate.cards;
-
-    // 1. Огнемёт: наивысший приоритет
-    const flameCard = cards.find(c => c.code === 'FLAMETHROWER');
-    if (flameCard) {
-      const validTarget = adjacentTargets.find(t => 
-        t.quarantineTurns === 0 && !isDoorBetween(state.doors, currentId, t.id, state.players)
-      );
-      if (validTarget) {
-        await this.playCard(roomId, currentId, flameCard.id, validTarget.id);
-        return;
-      }
-    }
-
-    // 2. Упорство: поиск снабжения
-    const perseveranceCard = cards.find(c => c.code === 'PERSEVERANCE');
-    if (perseveranceCard) {
-      await this.playCard(roomId, currentId, perseveranceCard.id);
-      return;
-    }
-
-    // 3. Топор: срубить смежную дверь или карантин
-    const axeCard = cards.find(c => c.code === 'AXE');
-    if (axeCard) {
-      const doorIdx = state.doors.findIndex(d => 
-        (d.seatA === botPlayer.seatIndex || d.seatB === botPlayer.seatIndex)
-      );
-      if (doorIdx !== -1) {
-        await this.playCard(roomId, currentId, axeCard.id, undefined, doorIdx);
-        return;
-      }
-      const quarTarget = adjacentTargets.find(t => t.quarantineTurns > 0);
-      if (quarTarget) {
-        await this.playCard(roomId, currentId, axeCard.id, quarTarget.id);
-        return;
-      }
-    }
-
-    // 4. Анализ крови / Подозрение
-    const checkCard = cards.find(c => c.code === 'ANALYSIS' || c.code === 'SUSPICION');
-    if (checkCard) {
-      const validTarget = adjacentTargets.find(t => 
-        t.quarantineTurns === 0 && !isDoorBetween(state.doors, currentId, t.id, state.players)
-      );
-      if (validTarget) {
-        await this.playCard(roomId, currentId, checkCard.id, validTarget.id);
-        return;
-      }
-    }
-
-    // 5. Виски
-    const whiskeyCard = cards.find(c => c.code === 'WHISKEY');
-    if (whiskeyCard && botPrivate.role === 'HUMAN') {
-      await this.playCard(roomId, currentId, whiskeyCard.id);
-      return;
-    }
-
-    // 6. Смена направления (Гляди по сторонам)
-    const lookCard = cards.find(c => c.code === 'LOOK_AROUND');
-    if (lookCard) {
-      await this.playCard(roomId, currentId, lookCard.id);
-      return;
-    }
-
-    // 7. Соблазн: внеочередной обмен
-    const seductionCard = cards.find(c => c.code === 'SEDUCTION');
-    if (seductionCard) {
-      const otherPlayers = living.filter(p => p.id !== currentId && p.quarantineTurns === 0);
-      if (otherPlayers.length > 0) {
-        const target = otherPlayers[Math.floor(Math.random() * otherPlayers.length)];
-        await this.playCard(roomId, currentId, seductionCard.id, target.id);
-        return;
-      }
-    }
-
-    // 8. Заколоченная дверь
-    const doorCard = cards.find(c => c.code === 'BARRED_DOOR');
-    if (doorCard) {
-      const openNeighbor = adjacentTargets.find(t => !isDoorBetween(state.doors, currentId, t.id, state.players));
-      if (openNeighbor) {
-        await this.playCard(roomId, currentId, doorCard.id, openNeighbor.id);
-        return;
-      }
-    }
-
-    // 9. Карантин
-    const quarCard = cards.find(c => c.code === 'QUARANTINE');
-    if (quarCard) {
-      const validTarget = adjacentTargets.find(t => t.quarantineTurns === 0);
-      if (validTarget) {
-        await this.playCard(roomId, currentId, quarCard.id, validTarget.id);
-        return;
-      }
-    }
-
-    // 10. Если карты действия не разыграны — сброс карты
-    const nonCriticalCards = botPrivate.cards.filter(c => c.code !== 'THE_THING');
-    const discardCandidate = nonCriticalCards.find(c => c.code !== 'INFECTION' || botPrivate.role !== 'INFECTED' || botPrivate.cards.filter(x => x.code === 'INFECTION').length > 1) || nonCriticalCards[0];
-    if (discardCandidate) {
-      await this.discardCard(roomId, currentId, discardCandidate.id);
+    if (decision.action === 'PLAY') {
+      await this.playCard(roomId, currentId, decision.cardId, decision.targetPlayerId, decision.selectedDoorIndex);
+    } else if (decision.action === 'DISCARD') {
+      await this.discardCard(roomId, currentId, decision.cardId);
     }
   }
 
@@ -2130,17 +1963,12 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === targetId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    const botPrivate = local.privateStates[targetId];
+    const botPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetId);
     if (!botPrivate) return;
 
     const allowed = local.publicState.pendingDefense.allowedDefenseCodes;
-    const defenseCard = botPrivate.cards.find(c => allowed.includes(c.code));
-
-    if (defenseCard) {
-      await this.respondDefense(roomId, targetId, defenseCard.id);
-    } else {
-      await this.respondDefense(roomId, targetId, null);
-    }
+    const defenseCard = decideBotDefenseCard(botPrivate, allowed);
+    await this.respondDefense(roomId, targetId, defenseCard ? defenseCard.id : null);
   }
 
   public async runBotExchangeOffer(roomId: string) {
@@ -2151,22 +1979,10 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === currentId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    if (!local.privateStates[currentId]) {
-      await this.getPlayerPrivate(roomId, currentId);
-    }
-    const botPrivate = local.privateStates[currentId];
+    const botPrivate = await this.getOrFetchPlayerPrivate(local, roomId, currentId);
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
-    let cardToOffer: GameCard | undefined;
-    // Только Нечто может передавать заражение!
-    if (botPrivate.role === 'THE_THING') {
-      cardToOffer = botPrivate.cards.find(c => c.code === 'INFECTION');
-    }
-    // Если Нечто передает обычную карту или бот — Человек/Зараженный:
-    if (!cardToOffer) {
-      cardToOffer = botPrivate.cards.find(c => c.code !== 'THE_THING' && c.code !== 'INFECTION') || botPrivate.cards[0];
-    }
-
+    const cardToOffer = decideBotExchangeOfferCard(botPrivate);
     if (cardToOffer) {
       await this.offerExchangeCard(roomId, currentId, cardToOffer.id);
     }
@@ -2183,17 +1999,10 @@ class NetworkManager {
     const botPlayer = local.publicState.players.find(p => p.id === targetId);
     if (!botPlayer || !botPlayer.isBot) return;
 
-    if (!local.privateStates[targetId]) {
-      await this.getPlayerPrivate(roomId, targetId);
-    }
-    const botPrivate = local.privateStates[targetId];
+    const botPrivate = await this.getOrFetchPlayerPrivate(local, roomId, targetId);
     if (!botPrivate || botPrivate.cards.length === 0) return;
 
-    let cardToGive = botPrivate.cards.find(c => c.code !== 'THE_THING' && c.code !== 'INFECTION');
-    if (!cardToGive) {
-      cardToGive = botPrivate.cards[0];
-    }
-
+    const cardToGive = decideBotExchangeResponseCard(botPrivate);
     if (cardToGive) {
       await this.respondExchange(roomId, targetId, cardToGive.id);
     }
