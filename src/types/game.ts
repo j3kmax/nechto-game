@@ -74,7 +74,7 @@ export interface PlayerPublic {
 export type DeckCardType = 'PANIC' | 'EVENT';
 
 export interface PendingCardChoice {
-  type: 'PERSEVERANCE_PICK' | 'PERSEVERANCE_DISCARD' | 'BLIND_DATE_DISCARD';
+  type: 'PERSEVERANCE_PICK' | 'PERSEVERANCE_DISCARD' | 'BLIND_DATE_DISCARD' | 'CHAIN_REACTION_PASS';
   title: string;
   description: string;
   availableCards: GameCard[];
@@ -86,7 +86,7 @@ export interface PlayerPrivate {
   cards: GameCard[];
   infectedBy?: string; // ID игрока, который заразил
   privateLogs?: GameLogEntry[]; // Личный журнал событий игрока
-  pendingChoice?: PendingCardChoice | null; // Интерактивный выбор карт (Упорство, Свидание вслепую)
+  pendingChoice?: PendingCardChoice | null; // Интерактивный выбор карт (Упорство, Свидание вслепую, Цепная реакция)
 }
 
 export type TurnPhase = 
@@ -98,6 +98,7 @@ export type TurnPhase =
   | 'EXCHANGE_RESPOND'
   | 'EXCHANGE_DEFENSE_WAIT'
   | 'DISCARD'
+  | 'CHAIN_REACTION'
   | 'GAME_OVER';
 
 export interface PendingDefense {
@@ -133,6 +134,13 @@ export interface RoomSettings {
   maxPlayers: number;
 }
 
+export interface ChainReactionState {
+  activePlayerId: string;
+  targetPlayerId: string;
+  pendingOrder: string[];
+  picks: Record<string, string>; // playerId -> cardId
+}
+
 export interface RoomPublicState {
   roomId: string;
   hostId: string;
@@ -163,6 +171,7 @@ export interface RoomPublicState {
     playerName: string;
     timestamp: number;
   } | null;
+  chainReaction?: ChainReactionState | null;
   finalRoles?: Record<string, Role>;
   lastUpdated: number;
 }

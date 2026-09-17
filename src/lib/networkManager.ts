@@ -59,14 +59,19 @@ interface LocalGameState {
 class NetworkManager {
   private localRooms: Map<string, LocalGameState> = new Map();
   private localChannels: Map<string, BroadcastChannel> = new Map();
-  public botDelayMs: number = 1200;
+  private botTimers: Map<string, NodeJS.Timeout> = new Map();
+  public botDelayMs?: number;
 
-  public scheduleBotAction(fn: () => void | Promise<void>, delayMs: number = 1200) {
-    if (this.botDelayMs <= 0) {
-      fn();
-    } else {
-      setTimeout(fn, this.botDelayMs);
+  public scheduleBotAction(fn: () => void | Promise<void>, delayMs: number = 1200, actionKey: string = 'default') {
+    const actualDelay = this.botDelayMs !== undefined ? this.botDelayMs : delayMs;
+    if (this.botTimers.has(actionKey)) {
+      clearTimeout(this.botTimers.get(actionKey)!);
     }
+    const timer = setTimeout(() => {
+      this.botTimers.delete(actionKey);
+      fn();
+    }, actualDelay);
+    this.botTimers.set(actionKey, timer);
   }
 
   constructor() {
@@ -592,48 +597,125 @@ class NetworkManager {
     return null;
   }
 
-  // Метод выполнения Цепной реакции: одновременная передача 1 карты по кругу
-  private executeChainReaction(local: LocalGameState) {
+  // Интерактивная Цепная реакция: выбор карт игроками ПО ОЧЕРЕДИ
+  private async initiateChainReaction(local: LocalGameState, roomId: string, starterId: string): Promise<void> {
     const state = local.publicState;
     const living = getLivingPlayers(state.players);
-    if (living.length < 2) return;
-
-    const passedCards: { fromId: string; toId: string; card: GameCard; fromRole: Role }[] = [];
-
-    for (let i = 0; i < living.length; i++) {
-      const p = living[i];
-      const priv = local.privateStates[p.id];
-      if (!priv || priv.cards.length === 0) continue;
-
-      const nextIdx = (i + (state.direction === 1 ? 1 : -1) + living.length) % living.length;
-      const targetP = living[nextIdx];
-
-      let cardIdx = -1;
-      if (priv.role === 'THE_THING' || priv.role === 'INFECTED') {
-        cardIdx = priv.cards.findIndex(c => c.code === 'INFECTION');
-      }
-      if (cardIdx === -1) {
-        cardIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'HUMAN'));
-      }
-      if (cardIdx === -1) cardIdx = 0;
-
-      const card = priv.cards.splice(cardIdx, 1)[0];
-      passedCards.push({ fromId: p.id, toId: targetP.id, card, fromRole: priv.role });
+    if (living.length < 2) {
+      this.addLog(state, `«Цепная реакция» невозможна — за столом недостаточно живых полярников.`);
+      await this.endTurn(local, roomId);
+      return;
     }
 
-    for (const item of passedCards) {
-      const targetPriv = local.privateStates[item.toId];
+    const startIdx = living.findIndex(p => p.id === starterId);
+    const initialIdx = startIdx !== -1 ? startIdx : 0;
+    const order: string[] = [];
+
+    for (let i = 0; i < living.length; i++) {
+      const idx = (initialIdx + (state.direction === 1 ? i : -i) + living.length * 10) % living.length;
+      order.push(living[idx].id);
+    }
+
+    state.phase = 'CHAIN_REACTION';
+    const firstTargetId = order[1 % order.length];
+    state.chainReaction = {
+      activePlayerId: order[0],
+      targetPlayerId: firstTargetId,
+      pendingOrder: order,
+      picks: {},
+    };
+
+    this.addLog(state, `⚡ «Цепная реакция»! Все полярники по очереди выбирают по 1 карте для передачи соседу по кругу (${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}).`, 'PANIC');
+
+    await this.activateChainReactionStep(local, roomId, order[0]);
+  }
+
+  private async activateChainReactionStep(local: LocalGameState, roomId: string, playerId: string): Promise<void> {
+    const state = local.publicState;
+    const chain = state.chainReaction;
+    if (!chain) return;
+
+    const currentOrderIdx = chain.pendingOrder.indexOf(playerId);
+    const targetOrderIdx = (currentOrderIdx + 1) % chain.pendingOrder.length;
+    const targetId = chain.pendingOrder[targetOrderIdx];
+
+    const player = state.players.find(p => p.id === playerId);
+    const target = state.players.find(p => p.id === targetId);
+    if (!player || !target) return;
+
+    chain.activePlayerId = playerId;
+    chain.targetPlayerId = targetId;
+
+    if (!local.privateStates[playerId]) {
+      await this.getPlayerPrivate(roomId, playerId);
+    }
+    const priv = local.privateStates[playerId];
+    if (!priv) return;
+
+    const validCards = priv.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'HUMAN'));
+    priv.pendingChoice = {
+      type: 'CHAIN_REACTION_PASS',
+      title: 'Цепная реакция: Выберите карту',
+      description: `Передайте 1 карту полярнику ${target.name} по кругу (направление: ${state.direction === 1 ? 'по часовой ↻' : 'против часовой ↺'}).`,
+      availableCards: validCards.length > 0 ? validCards : priv.cards,
+    };
+
+    if (player.isBot) {
+      this.addLog(state, `⚡ «Цепная реакция»: ${player.name} выбирает карту для передачи ${target.name}...`, 'PANIC');
+      this.scheduleBotAction(() => this.runBotChainReactionPick(roomId, playerId), 1200, `bot_chain_${playerId}`);
+    } else {
+      this.addLog(state, `⚡ «Цепная реакция»: ожидается выбор карты от ${player.name} для передачи ${target.name}...`, 'PANIC');
+    }
+
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local, [playerId]);
+  }
+
+  private async finalizeChainReaction(local: LocalGameState, roomId: string): Promise<void> {
+    const state = local.publicState;
+    const chain = state.chainReaction;
+    if (!chain) return;
+
+    const order = chain.pendingOrder;
+    const cardsToTransfer: { fromId: string; toId: string; card: GameCard; fromRole: Role }[] = [];
+
+    for (let i = 0; i < order.length; i++) {
+      const fromId = order[i];
+      const toId = order[(i + 1) % order.length];
+      const cardId = chain.picks[fromId];
+
+      if (!local.privateStates[fromId]) {
+        await this.getPlayerPrivate(roomId, fromId);
+      }
+      const fromPriv = local.privateStates[fromId];
+      if (!fromPriv) continue;
+
+      let cardIdx = fromPriv.cards.findIndex(c => c.id === cardId || c.code === cardId);
+      if (cardIdx === -1) {
+        const safeIdx = fromPriv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || fromPriv.role !== 'HUMAN'));
+        cardIdx = safeIdx !== -1 ? safeIdx : 0;
+      }
+      const card = fromPriv.cards.splice(cardIdx, 1)[0];
+      cardsToTransfer.push({ fromId, toId, card, fromRole: fromPriv.role });
+    }
+
+    for (const item of cardsToTransfer) {
+      if (!local.privateStates[item.toId]) {
+        await this.getPlayerPrivate(roomId, item.toId);
+      }
+      const toPriv = local.privateStates[item.toId];
       const fromPlayer = state.players.find(p => p.id === item.fromId);
       const toPlayer = state.players.find(p => p.id === item.toId);
-      if (targetPriv) {
-        targetPriv.cards.push(item.card);
+
+      if (toPriv) {
+        toPriv.cards.push(item.card);
         this.addPrivateLog(local, item.fromId, `⚡ «Цепная реакция»: вы передали карту «${item.card.name}» игроку ${toPlayer?.name || 'соседу'}.`, 'EXCHANGE');
         this.addPrivateLog(local, item.toId, `⚡ «Цепная реакция»: вы получили карту «${item.card.name}» от игрока ${fromPlayer?.name || 'соседа'}.`, 'EXCHANGE');
 
         if (item.card.code === 'INFECTION' && item.fromRole === 'THE_THING') {
-          if (targetPriv.role === 'HUMAN') {
-            targetPriv.role = 'INFECTED';
-            targetPriv.infectedBy = item.fromId;
+          if (toPriv.role === 'HUMAN') {
+            toPriv.role = 'INFECTED';
+            toPriv.infectedBy = item.fromId;
             this.addPrivateLog(local, item.toId, `☣️ ВАС ЗАРАЗИЛИ: Вы получили карту «Заражение» от Нечто! Теперь вы на стороне Нечто. Помогите Нечто победить людей!`, 'WARNING');
             this.addPrivateLog(local, item.fromId, `☣️ УСПЕХ: В ходе цепной реакции вы заразили игрока ${toPlayer?.name}! Теперь он ваш союзник.`, 'WARNING');
           }
@@ -645,10 +727,43 @@ class NetworkManager {
       const priv = local.privateStates[p.id];
       if (priv) p.handCount = priv.cards.length;
     }
+
+    state.chainReaction = null;
+    this.addLog(state, `⚡ «Цепная реакция» завершена! Все полярники по очереди выбрали и передали карты соседям по кругу. Ход завершен.`, 'PANIC');
+
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local, order);
+    await this.endTurn(local, roomId);
+  }
+
+  public async runBotChainReactionPick(roomId: string, botId: string): Promise<void> {
+    const local = this.localRooms.get(roomId);
+    if (!local || local.publicState.phase !== 'CHAIN_REACTION') return;
+
+    const botPlayer = local.publicState.players.find(p => p.id === botId);
+    if (!botPlayer || !botPlayer.isBot) return;
+
+    if (!local.privateStates[botId]) {
+      await this.getPlayerPrivate(roomId, botId);
+    }
+    const botPriv = local.privateStates[botId];
+    if (!botPriv || botPriv.cards.length === 0) return;
+
+    let cardToPass: GameCard | undefined;
+    if (botPriv.role === 'THE_THING') {
+      cardToPass = botPriv.cards.find(c => c.code === 'INFECTION');
+    }
+    if (!cardToPass) {
+      cardToPass = botPriv.cards.find(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || botPriv.role !== 'HUMAN')) || botPriv.cards[0];
+    }
+
+    if (cardToPass) {
+      await this.confirmCardChoice(roomId, botId, cardToPass.id);
+    }
   }
 
   // Вспомогательный метод: Фаза Добора (Draw Phase)
-  private executeDrawPhase(local: LocalGameState, roomId: string) {
+  private async executeDrawPhase(local: LocalGameState, roomId: string): Promise<void> {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
     const fullDeck = local.fullDrawDeck;
@@ -780,9 +895,7 @@ class NetworkManager {
           return;
         }
       } else if (drawnCard.code === 'PANIC_CHAIN_REACTION') {
-        this.executeChainReaction(local);
-        this.addLog(state, `⚡ «Цепная реакция»! Все игроки одновременно передали по 1 карте соседу по кругу! Ход завершен.`, 'PANIC');
-        this.endTurn(local, roomId);
+        await this.initiateChainReaction(local, roomId, currentId);
         return;
       } else if (drawnCard.code === 'CHANGE_DIRECTION') {
         state.direction = state.direction === 1 ? -1 : 1;
@@ -791,7 +904,7 @@ class NetworkManager {
         this.addLog(state, `Слепое доверие заставляет всех быть настороже.`, 'PANIC');
       }
 
-      this.executeDrawPhase(local, roomId);
+      await this.executeDrawPhase(local, roomId);
       return;
     }
 
@@ -802,8 +915,10 @@ class NetworkManager {
     state.phase = 'ACTION';
     state.lastUpdated = Date.now();
 
+    await this.saveAndSync(roomId, local, [currentId]);
+
     if (activePlayer.isBot) {
-      this.scheduleBotAction(() => this.runBotTurn(roomId), 1200);
+      this.scheduleBotAction(() => this.runBotTurn(roomId), 1200, `bot_turn_${currentId}`);
     }
   }
 
@@ -1676,7 +1791,41 @@ class NetworkManager {
       this.addPrivateLog(local, playerId, `Вы сбросили карту «${card.name}» в отбой. На руке 4 карты. Ход завершён.`, 'PANIC');
 
       activePrivate.pendingChoice = null;
-      this.endTurn(local, roomId);
+      await this.endTurn(local, roomId);
+
+      state.lastUpdated = Date.now();
+      await this.saveAndSync(roomId, local, [playerId]);
+      return { success: true };
+    } else if (choice.type === 'CHAIN_REACTION_PASS') {
+      const cardIdx = activePrivate.cards.findIndex(c => c.id === cardId || c.code === cardId || c.id.startsWith(cardId));
+      if (cardIdx === -1) return { success: false, error: 'Карта не найдена в руке.' };
+      const card = activePrivate.cards[cardIdx];
+
+      if (card.code === 'THE_THING') {
+        return { success: false, error: 'Карту «НЕЧТО» категорически запрещено передавать!' };
+      }
+      if (card.code === 'INFECTION' && activePrivate.role === 'HUMAN') {
+        return { success: false, error: 'Люди не могут передавать карту заражения.' };
+      }
+
+      const chain = state.chainReaction;
+      if (!chain) return { success: false, error: 'Цепная реакция не активна.' };
+
+      chain.picks[playerId] = card.id;
+      activePrivate.pendingChoice = null;
+
+      const nextPlayerId = chain.pendingOrder.find(pId => !chain.picks[pId]);
+
+      if (nextPlayerId) {
+        chain.activePlayerId = nextPlayerId;
+        const currentOrderIdx = chain.pendingOrder.indexOf(nextPlayerId);
+        const targetOrderIdx = (currentOrderIdx + 1) % chain.pendingOrder.length;
+        chain.targetPlayerId = chain.pendingOrder[targetOrderIdx];
+
+        await this.activateChainReactionStep(local, roomId, nextPlayerId);
+      } else {
+        await this.finalizeChainReaction(local, roomId);
+      }
 
       state.lastUpdated = Date.now();
       await this.saveAndSync(roomId, local, [playerId]);
@@ -1721,7 +1870,7 @@ class NetworkManager {
 
     local.fullDrawDeck = [];
     local.offeredExchangeCard = undefined;
-    local.forcedExchangeTargetId = undefined;
+    state.chainReaction = null;
 
     this.addLog(state, `Экспедиция завершена. Станция возвращена в режим подготовки к новому выходу.`);
     state.lastUpdated = Date.now();
@@ -1731,7 +1880,7 @@ class NetworkManager {
   }
 
   // 12. Завершение хода
-  private endTurn(local: LocalGameState, roomId: string) {
+  private async endTurn(local: LocalGameState, roomId: string): Promise<void> {
     const state = local.publicState;
     const living = getLivingPlayers(state.players);
 
@@ -1783,7 +1932,9 @@ class NetworkManager {
     }
 
     this.addLog(state, `Ход переходит к полярнику ${nextPlayer.name}.`);
-    this.executeDrawPhase(local, roomId);
+    state.lastUpdated = Date.now();
+    await this.saveAndSync(roomId, local);
+    await this.executeDrawPhase(local, roomId);
   }
 
   // Боты
@@ -1801,6 +1952,14 @@ class NetworkManager {
     }
     const botPrivate = local.privateStates[currentId];
     if (!botPrivate || botPrivate.cards.length === 0) return;
+
+    // Добираем карту до 5, если на руке меньше 5 карт перед совершением действия
+    while (botPrivate.cards.length < 5 && local.fullDrawDeck && local.fullDrawDeck.length > 0) {
+      const card = local.fullDrawDeck.shift()!;
+      botPrivate.cards.push(card);
+      this.syncDeckState(local);
+      botPlayer.handCount = botPrivate.cards.length;
+    }
 
     // Если бот на карантине - может только сбросить карту
     if (botPlayer.quarantineTurns > 0) {
@@ -1995,6 +2154,53 @@ class NetworkManager {
     }
   }
 
+  public handleHostBotTriggers(roomId: string) {
+    const local = this.localRooms.get(roomId);
+    if (!local || local.publicState.status !== 'PLAYING') return;
+
+    const state = local.publicState;
+
+    // 1. Ход бота (фаза действия)
+    if (state.phase === 'ACTION') {
+      const current = state.players.find(p => p.id === state.currentTurnPlayerId);
+      if (current && current.isBot && !current.isDead) {
+        this.scheduleBotAction(() => this.runBotTurn(roomId), 1200, `bot_turn_${current.id}`);
+      }
+    }
+
+    // 2. Бот должен предложить обмен
+    if (state.phase === 'EXCHANGE_OFFER') {
+      const current = state.players.find(p => p.id === state.currentTurnPlayerId);
+      if (current && current.isBot && !current.isDead) {
+        this.scheduleBotAction(() => this.runBotExchangeOffer(roomId), 1200, `bot_offer_${current.id}`);
+      }
+    }
+
+    // 3. Бот должен ответить на обмен
+    if (state.phase === 'EXCHANGE_RESPOND' && local.offeredExchangeCard) {
+      const target = state.players.find(p => p.id === local.offeredExchangeCard?.targetPlayerId);
+      if (target && target.isBot && !target.isDead) {
+        this.scheduleBotAction(() => this.runBotExchangeResponse(roomId), 1200, `bot_resp_${target.id}`);
+      }
+    }
+
+    // 4. Бот должен защититься
+    if ((state.phase === 'DEFENSE_WAIT' || state.phase === 'EXCHANGE_DEFENSE_WAIT') && state.pendingDefense) {
+      const target = state.players.find(p => p.id === state.pendingDefense?.targetPlayerId);
+      if (target && target.isBot && !target.isDead) {
+        this.scheduleBotAction(() => this.runBotDefense(roomId), 1500, `bot_def_${target.id}`);
+      }
+    }
+
+    // 5. Бот в цепной реакции
+    if (state.phase === 'CHAIN_REACTION' && state.chainReaction) {
+      const active = state.players.find(p => p.id === state.chainReaction?.activePlayerId);
+      if (active && active.isBot && !active.isDead) {
+        this.scheduleBotAction(() => this.runBotChainReactionPick(roomId, active.id), 1200, `bot_chain_${active.id}`);
+      }
+    }
+  }
+
   // 13. Подписка на публичное состояние комнаты
   public subscribeToRoom(roomId: string, callback: (state: RoomPublicState | null) => void): () => void {
     roomId = roomId.toUpperCase().trim();
@@ -2012,6 +2218,7 @@ class NetworkManager {
               local.publicState = remotePublic;
             }
             callback(remotePublic);
+            this.handleHostBotTriggers(roomId);
           } else {
             callback(this.localRooms.get(roomId)?.publicState || null);
           }
@@ -2025,6 +2232,7 @@ class NetworkManager {
               if (meta.fullDrawDeck) local.fullDrawDeck = meta.fullDrawDeck;
               if (meta.offeredExchangeCard) local.offeredExchangeCard = meta.offeredExchangeCard;
               if (meta.forcedExchangeTargetId) local.forcedExchangeTargetId = meta.forcedExchangeTargetId;
+              this.handleHostBotTriggers(roomId);
             }
           }
         });

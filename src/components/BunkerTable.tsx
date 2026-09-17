@@ -105,6 +105,7 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
               {phase === 'EXCHANGE_OFFER' && 'Выбор карты для обмена'}
               {phase === 'EXCHANGE_RESPOND' && 'Ответный выбор карты'}
               {phase === 'EXCHANGE_DEFENSE_WAIT' && 'Защита от обмена'}
+              {phase === 'CHAIN_REACTION' && '⚡ Цепная реакция: передача по кругу'}
               {phase === 'GAME_OVER' && 'Игра окончена'}
             </span>
           </div>
@@ -204,7 +205,10 @@ export const BunkerTable: React.FC<BunkerTableProps> = ({
           {activePlayer && (
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-950/70 border border-cyan-500/30 text-xs text-slate-200 shadow">
               <Flame className="w-3.5 h-3.5 text-orange-400 animate-pulse" />
-              <span>Сейчас ходит: <strong className="text-frost">{activePlayer.name}</strong></span>
+              <span>
+                {phase === 'CHAIN_REACTION' ? 'Передаёт карту: ' : 'Сейчас ходит: '}
+                <strong className="text-frost">{activePlayer.name}</strong>
+              </span>
             </div>
           )}
 

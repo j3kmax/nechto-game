@@ -427,23 +427,51 @@ async function runAllTests() {
   localChain.privateStates[cp1.id].cards[0] = generateCard('INFECTION', 999);
   localChain.privateStates[cp2.id].role = 'HUMAN';
 
-  // Убедимся, что у всех 4 игроков строго по 4 карты перед началом цепной реакции
+  // Убедимся, что у всех 4 игроков строго по 4 карты перед началом цепной реакции, а в колоде сверху обычная карта действия
   for (const p of localChain.publicState.players) {
     const priv = localChain.privateStates[p.id];
     while (priv.cards.length > 4) priv.cards.pop();
     while (priv.cards.length < 4) priv.cards.push(generateCard('WHISKEY', Math.floor(Math.random() * 10000)));
     p.handCount = 4;
   }
+  localChain.fullDrawDeck.unshift(generateCard('WHISKEY', 99999));
 
-  (networkManager as any).executeChainReaction(localChain);
+  await (networkManager as any).initiateChainReaction(localChain, roomIdChain, cp1.id);
+
+  assert(
+    localChain.publicState.phase === 'CHAIN_REACTION',
+    '«Цепная реакция» переводит фазу игры в CHAIN_REACTION'
+  );
+  assert(
+    localChain.privateStates[cp1.id].pendingChoice?.type === 'CHAIN_REACTION_PASS',
+    'Первому полярнику предложено выбрать карту для передачи соседу'
+  );
+
+  // Игрок выбирает карту «Заражение» для передачи
+  const infCard = localChain.privateStates[cp1.id].cards.find((c: GameCard) => c.code === 'INFECTION')!;
+  await networkManager.confirmCardChoice(roomIdChain, cp1.id, infCard.id);
+
+  // Боты 2, 3 и 4 последовательно выбирают карты для передачи
+  const cp3 = localChain.publicState.players[2];
+  const cp4 = localChain.publicState.players[3];
+  await networkManager.runBotChainReactionPick(roomIdChain, cp2.id);
+  await networkManager.runBotChainReactionPick(roomIdChain, cp3.id);
+  await networkManager.runBotChainReactionPick(roomIdChain, cp4.id);
 
   assert(
     localChain.privateStates[cp2.id].role === 'INFECTED',
     'В ходе «Цепной реакции» Нечто успешно заразило соседа картой Заражения'
   );
   assert(
-    localChain.publicState.players.every((p: PlayerPublic) => localChain.privateStates[p.id].cards.length === 4),
-    'Инвариант: после цепной реакции у каждого игрока ровно 4 карты'
+    localChain.publicState.players.every((p: PlayerPublic) => {
+      const isCurrentTurn = p.id === localChain.publicState.currentTurnPlayerId && localChain.publicState.phase === 'ACTION';
+      return isCurrentTurn ? localChain.privateStates[p.id].cards.length === 5 : localChain.privateStates[p.id].cards.length === 4;
+    }),
+    'Инвариант: после цепной реакции и перехода хода у активного игрока 5 карт, у остальных 4'
+  );
+  assert(
+    localChain.publicState.chainReaction === null,
+    'После завершения выбора всеми игроками цепная реакция очищена'
   );
 
   // --- БЛОК 8: КАРТЫ ДВИЖЕНИЯ И НАПРАВЛЕНИЯ («Гляди по сторонам», «Меняемся местами!», «Мне и здесь неплохо», «Соблазн») ---
@@ -618,6 +646,9 @@ async function runAllTests() {
         await networkManager.runBotDefense(simRoomId);
       } else if (phase === 'EXCHANGE_RESPOND') {
         await networkManager.runBotExchangeResponse(simRoomId);
+      } else if (phase === 'CHAIN_REACTION' && simLocal.publicState.chainReaction) {
+        const activeBotId = simLocal.publicState.chainReaction.activePlayerId;
+        await networkManager.runBotChainReactionPick(simRoomId, activeBotId);
       }
 
       // Проверка строгих инвариантов:
