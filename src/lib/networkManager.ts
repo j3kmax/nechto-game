@@ -117,15 +117,13 @@ class NetworkManager {
         const cleanPublic = cleanForFirestore(state.publicState);
         promises.push(setDoc(doc(db, 'rooms', roomId, 'public', 'state'), cleanPublic));
 
-        // 2. Секретные карты каждого игрока (сохраняем ТОЛЬКО затронутых игроков, чтобы не перезаписывать чужие руки)
-        const targetIds = modifiedPlayerIds && modifiedPlayerIds.length > 0 
-          ? modifiedPlayerIds 
-          : Object.keys(state.privateStates);
-
-        for (const pId of targetIds) {
-          if (state.privateStates[pId]) {
-            const cleanPriv = cleanForFirestore(state.privateStates[pId]);
-            promises.push(setDoc(doc(db, 'rooms', roomId, 'private', pId), cleanPriv));
+        // 2. Секретные карты каждого игрока (сохраняем ТОЛЬКО явно переданных измененных игроков, чтобы не затирать чужие руки)
+        if (modifiedPlayerIds && modifiedPlayerIds.length > 0) {
+          for (const pId of modifiedPlayerIds) {
+            if (state.privateStates[pId]) {
+              const cleanPriv = cleanForFirestore(state.privateStates[pId]);
+              promises.push(setDoc(doc(db, 'rooms', roomId, 'private', pId), cleanPriv));
+            }
           }
         }
 
@@ -566,7 +564,7 @@ class NetworkManager {
     await this.executeDrawPhase(local, roomId);
 
     local.publicState.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, playerIds);
     return { success: true };
   }
 
@@ -783,7 +781,11 @@ class NetworkManager {
     this.syncDeckState(local);
 
     const activePlayer = state.players.find(p => p.id === currentId);
-    const activePrivate = local.privateStates[currentId];
+    let activePrivate: PlayerPrivate | null | undefined = local.privateStates[currentId];
+    if (!activePrivate) {
+      activePrivate = await this.getPlayerPrivate(roomId, currentId);
+      if (activePrivate) local.privateStates[currentId] = activePrivate;
+    }
 
     if (!activePlayer || !activePrivate) return;
 
@@ -821,8 +823,8 @@ class NetworkManager {
             const tempSeat = p1.seatIndex;
             p1.seatIndex = p2.seatIndex;
             p2.seatIndex = tempSeat;
+            this.addLog(state, `🔀 ${p1.name} и ${p2.name} поменялись местами за столом!`, 'PANIC');
           }
-          this.addLog(state, `🔄 Полярники попарно поменялись местами за столом!`, 'PANIC');
         }
       } else if (drawnCard.code === 'PANIC_ONE_TWO_5') {
         const living = getLivingPlayers(state.players);
@@ -836,9 +838,12 @@ class NetworkManager {
             this.addLog(state, `🔄 «Раз, два... Нечто поднялось со дна!» ${activePlayer.name} поменялся местами с ${targetP.name}!`, 'PANIC');
           }
         }
+      } else if (drawnCard.code === 'PANIC_CHAIN_REACTION') {
+        await this.initiateChainReaction(local, roomId, currentId);
+        return;
       } else if (drawnCard.code === 'PANIC_GET_AWAY_5') {
-        const others = getLivingPlayers(state.players).filter(p => p.id !== currentId && p.quarantineTurns === 0);
-        if (others.length > 0 && activePlayer.quarantineTurns === 0) {
+        const others = state.players.filter(p => p.id !== currentId && !p.isDead);
+        if (others.length > 0) {
           const targetP = others[0];
           const tempSeat = activePlayer.seatIndex;
           activePlayer.seatIndex = targetP.seatIndex;
@@ -848,7 +853,7 @@ class NetworkManager {
       } else if (drawnCard.code === 'PANIC_FORGETFULNESS') {
         let discardedCount = 0;
         while (discardedCount < 3 && activePrivate.cards.length > 1) {
-          const idx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED'));
+          const idx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (activePrivate.role === 'INFECTED' && activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1)));
           if (idx !== -1) {
             state.discardPile.unshift(activePrivate.cards.splice(idx, 1)[0]);
             discardedCount++;
@@ -861,6 +866,7 @@ class NetworkManager {
         }
         activePlayer.handCount = activePrivate.cards.length;
         this.addLog(state, `🧠 «Забывчивость»! ${activePlayer.name} сбросил ${discardedCount} карт и обновил руку из колоды. Ход завершен!`, 'PANIC');
+        this.addPrivateLog(local, currentId, `🧠 «Забывчивость»! Вы сбросили ${discardedCount} карт и получили новые из колоды. Ваша рука (${activePrivate.cards.length} карт): ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}. Ход завершён.`, 'PANIC');
         state.lastUpdated = Date.now();
         await this.saveAndSync(roomId, local, [currentId]);
         await this.endTurn(local, roomId);
@@ -876,32 +882,31 @@ class NetworkManager {
         activePlayer.handCount = activePrivate.cards.length;
 
         if (activePlayer.isBot) {
-          const swapIdx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED' || activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1));
+          const swapIdx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (activePrivate.role === 'INFECTED' && activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1)));
           if (swapIdx !== -1) {
             const discarded = activePrivate.cards.splice(swapIdx, 1)[0];
             state.discardPile.unshift(discarded);
             activePlayer.handCount = activePrivate.cards.length;
-            this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} тайно сменил карту из руки на карту из колоды. Ход завершен!`, 'PANIC');
+            this.addLog(state, `🙈 «Свидание вслепую»! Бот ${activePlayer.name} сбросил карту в отбой взамен полученной. Ход завершен!`, 'PANIC');
+            state.lastUpdated = Date.now();
+            await this.saveAndSync(roomId, local, [currentId]);
+            await this.endTurn(local, roomId);
+            return;
           }
-          await this.endTurn(local, roomId);
-          return;
         } else {
-          const discardableCards = activePrivate.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED' || activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1));
+          this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} взял 1 карту события и должен выбрать 1 карту из руки для сброса.`, 'PANIC');
+          this.addPrivateLog(local, currentId, `🙈 «Свидание вслепую»! Вы вытянули карту «${newCard.name}». Выберите 1 карту из руки для сброса в отбой.`, 'PANIC');
+          const discardableCards = activePrivate.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (activePrivate.role === 'INFECTED' && activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1)));
           activePrivate.pendingChoice = {
             type: 'BLIND_DATE_DISCARD',
-            title: 'Паника: Свидание вслепую!',
-            description: `Вы взяли верхнюю карту «${newCard.name}» из колоды (теперь у вас 5 карт). Выберите, какую карту сбросить из руки в отбой взамен, чтобы на руке осталось ровно 4 карты. После сброса ваш ход завершится.`,
+            title: 'Свидание вслепую: Сбросьте 1 карту',
+            description: 'Вы получили верхнюю карту события из колоды. Теперь выберите 1 карту из руки для сброса в отбой.',
             availableCards: discardableCards.length > 0 ? discardableCards : activePrivate.cards,
           };
-          this.addLog(state, `🙈 «Свидание вслепую»! ${activePlayer.name} взял верхнюю карту из колоды и выбирает, какую карту сбросить взамен...`, 'PANIC');
-          this.addPrivateLog(local, currentId, `Вы вытянули «Свидание вслепую»! Из колоды получена карта «${newCard.name}» (всего 5 карт в руке). Выберите 1 карту для сброса в отбой.`, 'PANIC');
           state.lastUpdated = Date.now();
           await this.saveAndSync(roomId, local, [currentId]);
           return;
         }
-      } else if (drawnCard.code === 'PANIC_CHAIN_REACTION') {
-        await this.initiateChainReaction(local, roomId, currentId);
-        return;
       } else if (drawnCard.code === 'CHANGE_DIRECTION') {
         state.direction = state.direction === 1 ? -1 : 1;
         this.addLog(state, `Направление хода изменилось: теперь ${state.direction === 1 ? 'по часовой стрелке ↻' : 'против часовой стрелки ↺'}.`, 'PANIC');
@@ -920,7 +925,8 @@ class NetworkManager {
     // Обычная карта добавляется в руку
     activePrivate.cards.push(drawnCard);
     activePlayer.handCount = activePrivate.cards.length;
-    this.addPrivateLog(local, currentId, `📥 Вы взяли из колоды карту «${drawnCard.name}» (${drawnCard.category === 'ACTION' ? 'Действие' : drawnCard.category === 'DEFENSE' ? 'Защита' : drawnCard.category === 'OBSTACLE' ? 'Препятствие' : 'Заражение'}).`, 'INFO');
+    const catRu = drawnCard.category === 'ACTION' ? 'Действие' : drawnCard.category === 'DEFENSE' ? 'Защита' : drawnCard.category === 'OBSTACLE' ? 'Препятствие' : 'Заражение';
+    this.addPrivateLog(local, currentId, `📥 Взята карта из колоды: «${drawnCard.name}» (${catRu}). На руке (${activePrivate.cards.length} карт): ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}.`, 'INFO');
     state.phase = 'ACTION';
     state.lastUpdated = Date.now();
 
@@ -969,7 +975,7 @@ class NetworkManager {
     activePrivate.cards.splice(cardIndex, 1);
     activePlayer.handCount = activePrivate.cards.length;
     state.discardPile.unshift(card);
-    this.addPrivateLog(local, playerId, `🚀 Вы сыграли карту «${card.name}»${targetPlayer ? ` на ${targetPlayer.name}` : ''}.`, 'INFO');
+    this.addPrivateLog(local, playerId, `🚀 Вы сыграли карту «${card.name}»${targetPlayer ? ` на ${targetPlayer.name}` : ''}. Карта отправлена в отбой. На руке (${activePrivate.cards.length} карт): ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}.`, 'INFO');
 
     switch (card.code) {
       case 'FLAMETHROWER': {
@@ -1163,8 +1169,8 @@ class NetworkManager {
           this.syncDeckState(local);
           if (topCard.category === 'PANIC') {
             state.discardPile.unshift(topCard);
-            this.addLog(state, `При обыске полярник ${activePlayer.name} наткнулся на карту паники «${topCard.name}» — она сброшена!`, 'PANIC');
-            this.addPrivateLog(local, playerId, `При розыгрыше «Упорства» в ящиках обнаружена карта паники «${topCard.name}» — отправлена в сброс.`, 'PANIC');
+            this.addLog(state, `📦 При обыске с «Упорством» карта паники «${topCard.name}» пропущена и отправлена в сброс (её эффект не активируется по правилам).`, 'INFO');
+            this.addPrivateLog(local, playerId, `📦 При розыгрыше «Упорства» в ящиках обнаружена карта паники «${topCard.name}» — пропущена и отправлена в сброс без активации эффекта.`, 'INFO');
           } else {
             eventCards.push(topCard);
           }
@@ -1172,7 +1178,7 @@ class NetworkManager {
 
         if (eventCards.length === 0) {
           this.addLog(state, `В ящиках снабжения ничего не найдено!`);
-          await this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId, [playerId]);
           break;
         }
 
@@ -1183,13 +1189,15 @@ class NetworkManager {
           const toDiscard = eventCards.slice(1);
           state.discardPile.unshift(...toDiscard);
           activePrivate.cards.push(chosen);
-          const excessIdx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED' || activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1));
-          if (excessIdx !== -1) {
-            const discarded = activePrivate.cards.splice(excessIdx, 1)[0];
-            state.discardPile.unshift(discarded);
+          if (activePrivate.cards.length > 4) {
+            const excessIdx = activePrivate.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (activePrivate.role === 'INFECTED' && activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1)));
+            if (excessIdx !== -1) {
+              const discarded = activePrivate.cards.splice(excessIdx, 1)[0];
+              state.discardPile.unshift(discarded);
+            }
           }
           activePlayer.handCount = activePrivate.cards.length;
-          await this.advanceToExchange(local, roomId);
+          await this.advanceToExchange(local, roomId, [playerId]);
         } else {
           this.addPrivateLog(local, playerId, `Вы нашли 3 карты снабжения: ${eventCards.map(c => `«${c.name}»`).join(', ')}. Выберите 1 для добавления в руку!`, 'INFO');
           activePrivate.pendingChoice = {
@@ -1255,7 +1263,7 @@ class NetworkManager {
   }
 
   // Переход к фазе обмена
-  private async advanceToExchange(local: LocalGameState, roomId: string): Promise<void> {
+  private async advanceToExchange(local: LocalGameState, roomId: string, affectedPlayerIds?: string[]): Promise<void> {
     const state = local.publicState;
     const currentId = state.currentTurnPlayerId;
     const activePlayer = state.players.find(p => p.id === currentId);
@@ -1299,7 +1307,7 @@ class NetworkManager {
     this.addLog(state, `Фаза обмена: ${activePlayer?.name} должен выбрать карту для передачи ${targetNeighbor.name}.`, 'EXCHANGE');
 
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, affectedPlayerIds);
 
     if (activePlayer?.isBot) {
       this.scheduleBotAction(() => this.runBotExchangeOffer(roomId), 1200, `bot_offer_${currentId}`);
@@ -1466,8 +1474,8 @@ class NetworkManager {
     }
 
     this.addLog(state, `🤝 ${sourcePlayer?.name} и ${targetPlayer?.name} тайно обменялись картами под столом.`, 'EXCHANGE');
-    this.addPrivateLog(local, offer.fromPlayerId, `🤝 Вы передали карту «${actualOfferedCard.name}» и получили «${targetCard.name}» от ${targetPlayer?.name}.`, 'EXCHANGE');
-    this.addPrivateLog(local, targetPlayerId, `🤝 Вы передали карту «${targetCard.name}» и получили «${actualOfferedCard.name}» от ${sourcePlayer?.name}.`, 'EXCHANGE');
+    this.addPrivateLog(local, offer.fromPlayerId, `🤝 Вы передали «${actualOfferedCard.name}» и получили «${targetCard.name}» от ${targetPlayer?.name}. Ваша новая рука (${sourcePrivate.cards.length} карт): ${sourcePrivate.cards.map(c => `«${c.name}»`).join(', ')}.`, 'EXCHANGE');
+    this.addPrivateLog(local, targetPlayerId, `🤝 Вы передали «${targetCard.name}» и получили «${actualOfferedCard.name}» от ${sourcePlayer?.name}. Ваша новая рука (${targetPrivate.cards.length} карт): ${targetPrivate.cards.map(c => `«${c.name}»`).join(', ')}.`, 'EXCHANGE');
 
     local.offeredExchangeCard = undefined;
     state.pendingDefense = null;
@@ -1757,17 +1765,25 @@ class NetworkManager {
       state.discardPile.unshift(...unchosenCards);
 
       this.addLog(state, `📦 ${activePlayer.name} выбрал 1 карту снабжения из ящика и сбросил остальные.`);
-      this.addPrivateLog(local, playerId, `Вы выбрали карту «${card.name}» и добавили её в руку. Теперь у вас ${activePrivate.cards.length} карт. Выберите 1 карту из руки для сброса.`, 'INFO');
 
-      // Переходим ко второму шагу «Упорства»: сброс 1 карты из руки
-      const discardableCards = activePrivate.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || activePrivate.role !== 'INFECTED' || activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1));
+      // Шаг 2 «Упорства»: сброс карты требуется ТОЛЬКО если на руке больше 4 карт
+      if (activePrivate.cards.length > 4) {
+        this.addPrivateLog(local, playerId, `📦 Вы выбрали карту «${card.name}» и добавили её в руку. На руке (${activePrivate.cards.length} карт): ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}. Выберите 1 карту из руки для сброса.`, 'INFO');
 
-      activePrivate.pendingChoice = {
-        type: 'PERSEVERANCE_DISCARD',
-        title: 'Упорство: Сбросьте 1 карту',
-        description: 'У вас на руке 5 карт. Выберите 1 карту из руки для сброса в отбой, чтобы на руке осталось ровно 4 карты перед обменом.',
-        availableCards: discardableCards.length > 0 ? discardableCards : activePrivate.cards,
-      };
+        const discardableCards = activePrivate.cards.filter(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (activePrivate.role === 'INFECTED' && activePrivate.cards.filter(x => x.code === 'INFECTION').length > 1)));
+
+        activePrivate.pendingChoice = {
+          type: 'PERSEVERANCE_DISCARD',
+          title: 'Упорство: Сбросьте 1 карту',
+          description: 'У вас на руке 5 карт. Выберите 1 карту из руки для сброса в отбой, чтобы на руке осталось ровно 4 карты перед обменом.',
+          availableCards: discardableCards.length > 0 ? discardableCards : activePrivate.cards.filter(c => c.code !== 'THE_THING'),
+        };
+      } else {
+        // На руке уже 4 карты (или меньше) — сброс карты не требуется!
+        this.addPrivateLog(local, playerId, `📦 Вы выбрали карту «${card.name}» и добавили её в руку. На руке ровно ${activePrivate.cards.length} карт: ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}. Сброс не требуется, переход к фазе обмена.`, 'INFO');
+        activePrivate.pendingChoice = null;
+        await this.advanceToExchange(local, roomId, [playerId]);
+      }
 
       state.lastUpdated = Date.now();
       await this.saveAndSync(roomId, local, [playerId]);
@@ -1785,10 +1801,10 @@ class NetworkManager {
       activePlayer.handCount = activePrivate.cards.length;
 
       this.addLog(state, `${activePlayer.name} сбросил карту в отбой после розыгрыша «Упорства».`);
-      this.addPrivateLog(local, playerId, `Вы сбросили карту «${card.name}» в отбой. На руке 4 карты. Переход к фазе обмена.`, 'INFO');
+      this.addPrivateLog(local, playerId, `📦 Вы сбросили карту «${card.name}» в отбой. На руке ровно ${activePrivate.cards.length} карт: ${activePrivate.cards.map(c => `«${c.name}»`).join(', ')}. Переход к фазе обмена.`, 'INFO');
 
       activePrivate.pendingChoice = null;
-      await this.advanceToExchange(local, roomId);
+      await this.advanceToExchange(local, roomId, [playerId]);
 
       state.lastUpdated = Date.now();
       await this.saveAndSync(roomId, local, [playerId]);
@@ -1924,22 +1940,33 @@ class NetworkManager {
       state.roundNumber += 1;
     }
 
-    // Строгий инвариант официальных правил (стр. 8): В начале и в конце хода на руке ровно 4 карты
-    for (const p of state.players) {
-      if (p.isDead) continue;
-      const priv = local.privateStates[p.id];
+    let handModified = false;
+    // Проверка руки завершившего ход игрока: на руке должно остаться ровно 4 карты
+    if (currentTurnPlayer && !currentTurnPlayer.isDead) {
+      const priv = local.privateStates[currentId];
       if (priv) {
         while (priv.cards.length > 4) {
-          const excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' || priv.role !== 'INFECTED'));
-          const toDiscard = excessIdx !== -1 ? priv.cards.splice(excessIdx, 1)[0] : priv.cards.pop()!;
-          state.discardPile.unshift(toDiscard);
+          handModified = true;
+          let excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && (c.code !== 'INFECTION' ? true : (priv.role === 'INFECTED' && priv.cards.filter(x => x.code === 'INFECTION').length > 1)));
+          if (excessIdx === -1) {
+            excessIdx = priv.cards.findIndex(c => c.code !== 'THE_THING' && c.code !== 'INFECTION');
+          }
+          if (excessIdx !== -1) {
+            const toDiscard = priv.cards.splice(excessIdx, 1)[0];
+            state.discardPile.unshift(toDiscard);
+            this.addPrivateLog(local, currentId, `⚠️ Авто-сброс лишней карты «${toDiscard.name}» при конце хода. На руке (${priv.cards.length} карт): ${priv.cards.map(c => `«${c.name}»`).join(', ')}.`, 'WARNING');
+          } else {
+            break;
+          }
         }
         while (priv.cards.length < 4 && local.fullDrawDeck && local.fullDrawDeck.length > 0) {
+          handModified = true;
           const restoredCard = local.fullDrawDeck.shift()!;
           priv.cards.push(restoredCard);
           this.syncDeckState(local);
+          this.addPrivateLog(local, currentId, `⚠️ Авто-добор карты «${restoredCard.name}» до 4 карт при конце хода. На руке (${priv.cards.length} карт): ${priv.cards.map(c => `«${c.name}»`).join(', ')}.`, 'WARNING');
         }
-        p.handCount = priv.cards.length;
+        currentTurnPlayer.handCount = priv.cards.length;
       }
     }
 
@@ -1951,7 +1978,7 @@ class NetworkManager {
 
     this.addLog(state, `Ход переходит к полярнику ${nextPlayer.name}.`);
     state.lastUpdated = Date.now();
-    await this.saveAndSync(roomId, local);
+    await this.saveAndSync(roomId, local, handModified ? [currentId] : undefined);
     await this.executeDrawPhase(local, roomId);
   }
 
@@ -2376,7 +2403,7 @@ class NetworkManager {
       lines.push(`[Место #${p.seatIndex}] ${p.name} (${typeStr}, ID: ${p.id})`);
       lines.push(`    Статус: ${deadStr}${quarStr} | Роль: ${roleStr}${infectedInfo} | Карт в руке: ${priv?.cards?.length ?? p.handCount}`);
       if (priv?.cards && priv.cards.length > 0) {
-        lines.push(`    Карты: ${priv.cards.map(c => `«${c.name}» (${c.category})`).join(', ')}`);
+        lines.push(`    Карты (${priv.cards.length}): ${priv.cards.map(c => `«${c.name}» (${c.category}, ID: ${c.id})`).join(', ')}`);
       }
     }
     lines.push('');
@@ -2392,7 +2419,18 @@ class NetworkManager {
     } else {
       lines.push('Заколоченных дверей нет.');
     }
-    lines.push(`Карт в колоде добора: ${state.deckCount}, карт в сбросе: ${state.discardPile.length}`);
+    const topType = state.topDeckType === 'PANIC' ? '⚠️ ПАНИКА' : state.topDeckType === 'EVENT' ? '📦 СОБЫТИЕ' : 'Пусто';
+    lines.push(`Карт в колоде добора: ${state.deckCount} (Верхняя карта: ${topType}), карт в сбросе: ${state.discardPile.length}`);
+    lines.push('');
+
+    lines.push(`--- 🗑️ СТОПКА СБРОСА / ОТБОЙ (${state.discardPile.length} карт, от верхней к нижней) ---`);
+    if (state.discardPile.length > 0) {
+      state.discardPile.forEach((c, idx) => {
+        lines.push(`  [#${idx + 1}] «${c.name}» (${c.category}, код: ${c.code})`);
+      });
+    } else {
+      lines.push('  Стопка сброса пуста.');
+    }
     lines.push('');
 
     lines.push(`--- 📢 ОБЩИЙ ЖУРНАЛ СТАНЦИИ (${state.logs.length} записей, от новых к старым) ---`);

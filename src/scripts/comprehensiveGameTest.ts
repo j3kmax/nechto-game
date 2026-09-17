@@ -75,8 +75,9 @@ async function runAllTests() {
   assert(!validateExchangeCard(infectionCard, infectedPriv).valid, 'Зараженный НЕ МОЖЕТ передавать карту «Заражение» (только Нечто заражает)');
   assert(validateExchangeCard(whiskeyCard, humanPriv).valid, 'Обычные карты событий можно передавать при обмене');
 
-  // 1.2. Сброс
   assert(!validateDiscardCard(theThingCard, thingPriv).valid, 'Карту «НЕЧТО» категорически запрещено сбрасывать');
+  assert(!validateDiscardCard(infectionCard, humanPriv).valid, 'Человек НЕ МОЖЕТ сбросить карту «Заражение» в отбой');
+  assert(!validateDiscardCard(infectionCard, thingPriv).valid, 'Нечто НЕ МОЖЕТ сбросить карту «Заражение» в отбой');
   assert(!validateDiscardCard(infectionCard, infectedPriv).valid, 'Зараженный не может сбросить свою единственную карту заражения');
   const doubleInfectedPriv: PlayerPrivate = { role: 'INFECTED', cards: [whiskeyCard, infectionCard, generateCard('INFECTION', 5)] };
   assert(validateDiscardCard(infectionCard, doubleInfectedPriv).valid, 'Зараженный может сбросить лишнюю вторую карту заражения');
@@ -186,6 +187,37 @@ async function runAllTests() {
   assert(
     localChoice.publicState.phase === 'EXCHANGE_OFFER',
     'После завершения «Упорства» ход автоматически переходит к фазе обмена'
+  );
+
+  // Тест карты «Упорство» при исходных 4 картах (после паники/сброса)
+  localChoice.publicState.phase = 'ACTION';
+  const perseveranceCard4 = generateCard('PERSEVERANCE', 106);
+  localChoice.privateStates[hostIdChoice].cards = [
+    perseveranceCard4,
+    generateCard('WHISKEY', 107),
+    generateCard('AXE', 108),
+    generateCard('SUSPICION', 109),
+  ];
+  localChoice.publicState.players[0].handCount = 4;
+  localChoice.fullDrawDeck = [
+    generateCard('FLAMETHROWER', 206),
+    generateCard('NO_BARBECUE', 207),
+    generateCard('LOOK_AROUND', 208),
+  ];
+  await networkManager.playCard(roomIdChoice, hostIdChoice, perseveranceCard4.id);
+  const cardToPick4 = localChoice.privateStates[hostIdChoice].pendingChoice.availableCards[0];
+  await networkManager.confirmCardChoice(roomIdChoice, hostIdChoice, cardToPick4.id);
+  assert(
+    localChoice.privateStates[hostIdChoice].cards.length === 4,
+    'При розыгрыше «Упорства» с 4 картами после взятия на руке ровно 4 карты'
+  );
+  assert(
+    localChoice.privateStates[hostIdChoice].pendingChoice === null,
+    'При 4 картах сброс не требуется, окно выбора закрыто'
+  );
+  assert(
+    localChoice.publicState.phase === 'EXCHANGE_OFFER',
+    'При 4 картах игра сразу перешла в фазу обмена'
   );
 
   // Тест паники «Свидание вслепую»

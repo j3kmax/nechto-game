@@ -384,7 +384,7 @@ export const CardHand: React.FC<CardHandProps> = ({
 
           // Проверка доступных действий
           const isPlayable = isCurrentTurn && phase === 'ACTION' && card.category !== 'THE_THING' && card.category !== 'INFECTION' && card.category !== 'DEFENSE' && activePlayer.quarantineTurns === 0;
-          const isDiscardable = isCurrentTurn && phase === 'ACTION' && card.code !== 'THE_THING' && !(card.code === 'INFECTION' && playerPrivate.role === 'INFECTED' && cards.filter(c => c.code === 'INFECTION').length <= 1);
+          const isDiscardable = isCurrentTurn && phase === 'ACTION' && card.code !== 'THE_THING' && (card.code !== 'INFECTION' ? true : (playerPrivate.role === 'INFECTED' && cards.filter(c => c.code === 'INFECTION').length > 1));
           const isExchangeableOffer = isCurrentTurn && phase === 'EXCHANGE_OFFER' && card.code !== 'THE_THING' && (card.code !== 'INFECTION' || playerPrivate.role !== 'HUMAN');
           const isExchangeableResponse = isExchangeTarget && (phase === 'EXCHANGE_RESPOND' || phase === 'EXCHANGE_DEFENSE_WAIT') && card.code !== 'THE_THING' && (card.code !== 'INFECTION' || playerPrivate.role !== 'HUMAN');
           const isDefendable = isDefenseTarget && card.category === 'DEFENSE';
@@ -393,6 +393,10 @@ export const CardHand: React.FC<CardHandProps> = ({
           let disabledReason = 'Недоступно в текущий момент';
           if (card.code === 'THE_THING') {
             disabledReason = 'Нечто нельзя сбросить или передать (стр. 8)';
+          } else if (card.code === 'INFECTION' && isCurrentTurn && phase === 'ACTION') {
+            disabledReason = playerPrivate.role === 'INFECTED'
+              ? 'Заражённый обязан сохранять хотя бы 1 Заражение (стр. 7)'
+              : 'Человек не может сбрасывать Заражение в отбой (стр. 7)';
           } else if (activePlayer.quarantineTurns > 0 && card.category === 'ACTION') {
             disabledReason = 'В карантине играть действия запрещено (стр. 13)';
           } else if (card.category === 'DEFENSE' && isCurrentTurn) {

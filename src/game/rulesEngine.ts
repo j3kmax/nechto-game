@@ -243,12 +243,16 @@ export function validateDiscardCard(
     return { valid: false, error: 'Карту «НЕЧТО» категорически запрещено сбрасывать!' };
   }
 
-  // Если это заражение:
   if (card.code === 'INFECTION') {
+    if (privateState.role === 'HUMAN') {
+      return { valid: false, error: 'Человек не может сбросить карту «Заражение» в отбой (стр. 7 правил)!' };
+    }
+    if (privateState.role === 'THE_THING') {
+      return { valid: false, error: 'Нечто не может сбрасывать карты заражения!' };
+    }
     const infectionCount = privateState.cards.filter(c => c.code === 'INFECTION').length;
-    // Если человек или зараженный с 1 картой:
-    if (privateState.role === 'INFECTED' && infectionCount <= 1) {
-      return { valid: false, error: 'Зараженный не может сбросить свою единственную карту заражения.' };
+    if (infectionCount <= 1) {
+      return { valid: false, error: 'Зараженный обязан держать как минимум 1 карту заражения и не может её сбросить.' };
     }
   }
 
